@@ -3,3 +3,7 @@ numpy
 av
 requests
 python-dotenv
+fastapi
+uvicorn[standard]
+httpx
+jinja2

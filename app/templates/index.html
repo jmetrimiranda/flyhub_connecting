@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Painel do pipeline — M4TD</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header id="status-bar">
+  <div class="status-card" id="card-availability">
+    <span class="dot" id="dot-availability"></span>
+    <div>
+      <div class="card-label">Disponibilidade</div>
+      <div class="card-value" id="availability-label">conectando…</div>
+    </div>
+  </div>
+
+  <div class="status-card" id="card-mtx">
+    <span class="dot" id="dot-mtx"></span>
+    <div>
+      <div class="card-label">MediaMTX</div>
+      <div class="card-value" id="mtx-label">—</div>
+    </div>
+  </div>
+
+  <div class="status-card" id="card-tunnel">
+    <span class="dot" id="dot-tunnel"></span>
+    <div>
+      <div class="card-label">Túnel</div>
+      <div class="card-value" id="tunnel-label">—</div>
+    </div>
+  </div>
+
+  <div class="status-card" id="card-stream">
+    <span class="dot" id="dot-stream"></span>
+    <div>
+      <div class="card-label">Stream</div>
+      <div class="card-value" id="stream-label">—</div>
+    </div>
+  </div>
+
+  <div class="conn" id="sse-state">SSE: conectando</div>
+</header>
+
+<main>
+  <section id="viewer">
+    <div class="placeholder">
+      <div class="placeholder-title">Visualização ao vivo</div>
+      <p>Ainda não implementada — chega na fatia 3 (MJPEG em <code>/stream</code>).</p>
+      <p>Por enquanto, para conferir o vídeo:</p>
+      <ul>
+        <li>HLS: <code id="hls-url">—</code></li>
+        <li>RTSP: <code id="rtsp-url">—</code></li>
+      </ul>
+    </div>
+    <table id="paths-table" hidden>
+      <thead>
+        <tr><th>Path</th><th>Pronto</th><th>Resolução</th><th>Taxa</th><th>Codecs</th><th>Parado há</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <aside id="controls">
+    <section class="panel">
+      <h2>Pipeline</h2>
+      <div class="btn-row">
+        <button id="btn-start" class="primary">Iniciar pipeline</button>
+        <button id="btn-stop" class="danger">Parar pipeline</button>
+      </div>
+      <div class="hint">
+        Path do stream: <code id="stream-path">{{ stream_path }}</code>
+      </div>
+      <ol id="steps"></ol>
+      <div id="pipeline-error" class="error" hidden></div>
+    </section>
+
+    <section class="panel" id="rtmp-panel">
+      <h2>Endereço para o FlightHub</h2>
+      <div class="rtmp-box">
+        <code id="rtmp-url">pipeline parado</code>
+        <button id="btn-copy" disabled>Copiar</button>
+      </div>
+      <div class="reminder">
+        O endereço muda a cada reinício. Depois de colar no FlightHub:
+        <strong>reedite o canal de encaminhamento</strong> e
+        <strong>desligue e religue o toggle</strong> — sem isso o drone continua
+        publicando no endereço antigo.
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Ainda no portal da DJI</h2>
+      <p class="hint">
+        Resolução e bitrate saem do encoder da aeronave e só podem ser mudados no
+        portal — não há controle para isso aqui.
+        <a href="https://www.dji.com/flighthub-2" target="_blank" rel="noopener">Abrir FlightHub 2</a>
+      </p>
+    </section>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

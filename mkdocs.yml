@@ -1,0 +1,70 @@
+site_name: FlightHub 2 → OpenCV
+site_description: Pipeline de ingestão de vídeo ao vivo de drones DJI para visão computacional
+site_author: Samarco
+copyright: Uso interno
+
+theme:
+  name: material
+  language: pt-BR
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Modo escuro
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Modo claro
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Início: index.md
+  - Como funciona:
+      - Arquitetura: guia/arquitetura.md
+      - Por que precisa de túnel: guia/rede.md
+  - Passo a passo:
+      - 1. Servidor de mídia: guia/01-mediamtx.md
+      - 2. Túnel público: guia/02-tunel.md
+      - 3. Canal no FlightHub: guia/03-flighthub.md
+      - 4. Captura no OpenCV: guia/04-captura.md
+      - 5. Visualização: guia/05-visualizacao.md
+  - Operação:
+      - Reduzir latência: guia/latencia.md
+      - Solução de problemas: guia/troubleshooting.md
+      - Ir para produção: guia/producao.md
+  - Referência:
+      - Arquivos de configuração: referencia/arquivos.md
+      - Comandos rápidos: referencia/comandos.md

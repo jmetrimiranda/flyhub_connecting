@@ -1,0 +1,33 @@
+logLevel: info
+
+rtmp: yes
+rtmpAddress: :1935
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsPartDuration: 200ms
+hlsSegmentDuration: 1s
+
+api: yes
+apiAddress: :9997
+
+webrtc: no
+srt: no
+
+authInternalUsers:
+  - user: any
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+
+paths:
+  all_others:

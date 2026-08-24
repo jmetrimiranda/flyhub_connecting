@@ -1,0 +1,26 @@
+{
+  "name": "flyhub-connecting",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "forwardPorts": [8000, 8888, 5000],
+  "portsAttributes": {
+    "8000": { "label": "MkDocs" },
+    "8888": { "label": "HLS", "visibility": "public" },
+    "5000": { "label": "Viewer MJPEG" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}

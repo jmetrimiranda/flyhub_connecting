@@ -38,6 +38,18 @@ Se você só quer rodar, na ordem:
 
 Se algo não funcionar, [solução de problemas](guia/troubleshooting.md) cobre os erros que aparecem na prática.
 
+## Já configurou antes?
+
+Com os scripts do repositório, as etapas 1 e 2 viram um comando:
+
+```bash
+./stop.sh && ./start.sh
+```
+
+Ele imprime o endereço RTMP novo, que você cola no FlightHub ([etapa 3](guia/03-flighthub.md)) antes de religar o toggle do canal.
+
+Detalhes em [reiniciar o pipeline](guia/reiniciar.md) — inclui a tabela de qual comando usar para cada sintoma e onde retomar.
+
 ## Estado atual validado
 
 Configuração testada e funcionando em 24/08/2026:

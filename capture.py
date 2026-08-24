@@ -1,30 +1,30 @@
-import os, json
-import mss, cv2, numpy as np
+import cv2, os, time
 
-CFG = "region.json"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer"
+URL = "rtsp://localhost:8554/live/m4td"
 
-def pick_region():
-    with mss.mss() as sct:
-        shot = np.array(sct.grab(sct.monitors[1]))
-    full = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
-    r = cv2.selectROI("Arraste sobre o video | ENTER confirma", full, False)
-    cv2.destroyAllWindows()
-    region = {"left": int(r[0]), "top": int(r[1]),
-              "width": int(r[2]), "height": int(r[3])}
-    json.dump(region, open(CFG, "w"))
-    return region
+def connect():
+    c = cv2.VideoCapture(URL, cv2.CAP_FFMPEG)
+    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return c
 
-region = json.load(open(CFG)) if os.path.exists(CFG) else pick_region()
+cap = connect()
+if not cap.isOpened():
+    raise SystemExit("nao conectou")
 
-with mss.mss() as sct:
-    while True:
-        frame = cv2.cvtColor(np.array(sct.grab(region)), cv2.COLOR_BGRA2BGR)
+print("conectado")
+n = 0
+while True:
+    ok, frame = cap.read()
+    if not ok:
+        print("reconectando...")
+        cap.release(); time.sleep(2); cap = connect()
+        continue
 
-        # >>> sua rede neural aqui <
-        # results = model(frame)
+    # >>> SUA REDE NEURAL AQUI <
+    # results = model(frame)
 
-        cv2.imshow("dock", frame)
-        if cv2.waitKey(1) == 27:
-            break
-
-cv2.destroyAllWindows()
+    n += 1
+    if n % 30 == 0:
+        cv2.imwrite("frame.jpg", frame)
+        print(f"frame {n} — {frame.shape}")

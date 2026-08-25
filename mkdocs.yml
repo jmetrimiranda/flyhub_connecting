@@ -61,6 +61,10 @@ nav:
       - 3. Canal no FlightHub: guia/03-flighthub.md
       - 4. Captura no OpenCV: guia/04-captura.md
       - 5. Visualização: guia/05-visualizacao.md
+  - Painel de controle:
+      - Visão geral: painel/index.md
+      - Referência dos controles: painel/controles.md
+      - API e armadilhas: painel/api.md
   - Operação:
       - Reiniciar o pipeline: guia/reiniciar.md
       - Reduzir latência: guia/latencia.md

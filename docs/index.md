@@ -50,6 +50,12 @@ Ele imprime o endereço RTMP novo, que você cola no FlightHub ([etapa 3](guia/0
 
 Detalhes em [reiniciar o pipeline](guia/reiniciar.md) — inclui a tabela de qual comando usar para cada sintoma e onde retomar.
 
+Ou use o [painel de controle](painel/index.md), que faz o mesmo pela web e mostra em tempo real se há voo disponível:
+
+```bash
+./run.sh
+```
+
 ## Estado atual validado
 
 Configuração testada e funcionando em 24/08/2026:

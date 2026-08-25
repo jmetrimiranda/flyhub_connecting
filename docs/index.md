@@ -29,12 +29,14 @@ Matrice 4TD  →  FlightHub 2  →  túnel  →  MediaMTX  →  OpenCV  →  red
 
 ## Caminho rápido
 
-Se você só quer rodar, na ordem:
+**[Rodar do zero](guia/00-rodar-do-zero.md)** — do ambiente vazio até ver quadros no Python, em 5 minutos. É a única página necessária para operar.
 
-1. [Subir o MediaMTX](guia/01-mediamtx.md) — 2 minutos
-2. [Abrir o túnel](guia/02-tunel.md) — 3 minutos
-3. [Configurar o canal no FlightHub](guia/03-flighthub.md) — 5 minutos
-4. [Rodar a captura](guia/04-captura.md) — 2 minutos
+As etapas individuais existem para quando algo der errado ou você quiser entender o porquê:
+
+1. [Subir o MediaMTX](guia/01-mediamtx.md)
+2. [Abrir o túnel](guia/02-tunel.md)
+3. [Configurar o canal no FlightHub](guia/03-flighthub.md)
+4. [Rodar a captura](guia/04-captura.md)
 
 Se algo não funcionar, [solução de problemas](guia/troubleshooting.md) cobre os erros que aparecem na prática.
 

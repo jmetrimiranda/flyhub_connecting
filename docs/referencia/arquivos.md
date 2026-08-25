@@ -158,18 +158,142 @@ if __name__ == "__main__":
             print(f"{n} | {n/(time.time()-t0):.1f} fps | {frame.shape}")
 ```
 
-## Comandos de subida
+## `start.sh`
+
+Sobe MediaMTX e túnel de uma vez e imprime o endereço RTMP. Idempotente — remove o container anterior antes de criar.
 
 ```bash
-# servidor de mídia
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH_NAME="${STREAM_PATH:-live/m4td}"
+
+echo "==> MediaMTX"
+docker rm -f mtx >/dev/null 2>&1 || true
 docker run -d --name mtx --restart unless-stopped \
-  -v $PWD/mediamtx.yml:/mediamtx.yml \
+  -v "$PWD/config/mediamtx.yml:/mediamtx.yml" \
+  -p 1935:1935 -p 8554:8554 -p 8888:8888 -p 9997:9997 \
+  bluenviron/mediamtx:latest >/dev/null
+
+for i in $(seq 1 15); do
+  curl -sf localhost:9997/v3/paths/list >/dev/null 2>&1 && break
+  sleep 1
+done
+curl -sf localhost:9997/v3/paths/list >/dev/null || {
+  echo "ERRO: API não respondeu. Veja: docker logs mtx"; exit 1; }
+echo "    API respondendo"
+
+echo "==> Túnel"
+pkill -f "bore local" 2>/dev/null || true
+nohup bore local 1935 --to bore.pub > /tmp/bore.log 2>&1 &
+
+ADDR=""
+for i in $(seq 1 20); do
+  ADDR=$(grep -oP 'listening at \K\S+' /tmp/bore.log 2>/dev/null | tail -1 || true)
+  [ -n "$ADDR" ] && break
+  sleep 1
+done
+[ -n "$ADDR" ] || { echo "ERRO: túnel não subiu. Veja /tmp/bore.log"; exit 1; }
+
+cat <<EOF
+
+  Cole no FlightHub → Endereço do servidor:
+
+      rtmp://${ADDR}/${PATH_NAME}
+
+  Depois: desligue e religue o toggle do canal.
+
+  Consumo OpenCV : rtsp://localhost:8554/${PATH_NAME}
+  Player HLS     : porta 8888, path /${PATH_NAME}
+
+EOF
+```
+
+Para usar outro path: `STREAM_PATH=live/dock3 ./start.sh`
+
+## `stop.sh`
+
+```bash
+#!/usr/bin/env bash
+docker rm -f mtx 2>/dev/null && echo "MediaMTX parado"
+pkill -f "bore local" 2>/dev/null && echo "Túnel parado"
+echo "Pipeline encerrado."
+```
+
+## `.devcontainer/devcontainer.json`
+
+Faz o Codespace se reconfigurar sozinho após rebuild.
+
+```json
+{
+  "name": "flyhub-connecting",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "forwardPorts": [8000, 8888, 5000],
+  "portsAttributes": {
+    "8000": { "label": "MkDocs" },
+    "8888": { "label": "HLS", "visibility": "public" },
+    "5000": { "label": "Viewer MJPEG" }
+  }
+}
+```
+
+## `.devcontainer/setup.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+sudo apt-get update -qq
+sudo apt-get install -y -qq ffmpeg libgl1 libglib2.0-0 >/dev/null
+
+if ! command -v bore >/dev/null 2>&1; then
+  URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
+    | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4)
+  curl -sL "$URL" | tar xz -C /tmp
+  sudo mv /tmp/bore /usr/local/bin/
+fi
+
+python -m pip install --upgrade pip --quiet
+[ -f requirements.txt ]      && python -m pip install -q -r requirements.txt
+[ -f requirements-docs.txt ] && python -m pip install -q -r requirements-docs.txt
+
+docker pull -q bluenviron/mediamtx:latest
+chmod +x start.sh stop.sh 2>/dev/null || true
+```
+
+## `.gitattributes`
+
+Sem isso, um script editado no Windows chega ao Linux com CRLF e falha com `bad interpreter: /bin/bash^M`.
+
+```
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+```
+
+## Comandos de subida
+
+Com os scripts:
+
+```bash
+./stop.sh && ./start.sh
+python3 capture.py
+```
+
+Manualmente:
+
+```bash
+docker run -d --name mtx --restart unless-stopped \
+  -v $PWD/config/mediamtx.yml:/mediamtx.yml \
   -p 1935:1935 -p 8554:8554 -p 8888:8888 -p 9997:9997 \
   bluenviron/mediamtx:latest
 
-# túnel (terminal separado)
-bore local 1935 --to bore.pub
-
-# captura (terminal separado)
-python3 capture.py
+bore local 1935 --to bore.pub   # terminal separado
+python3 capture.py              # terminal separado
 ```

@@ -12,12 +12,13 @@ Escopo entregue:
   conexão;
 - **fatias 2 e 3** — coleta de quadros com guarda de pré-condição, modais,
   máquina de estados e gravação em `raw/`; e o split temporal por blocos
-  contíguos disparado ao salvar, com `split_manifest.json`.
+  contíguos disparado ao salvar, com `split_manifest.json`;
+- **fatias 4 e 5** — tela de datasets com lista, galeria por partição, exclusão
+  de imagens e do dataset, refazer o split; e upload ao Roboflow preservando a
+  partição, com retomada de falha parcial.
 
-Fora de escopo, ainda não implementado: telas de datasets e de modelo
-(`/api/datasets*`, `/api/model/samples`), upload para o Roboflow
-(`/api/roboflow/*`) e a pasta `train/` — nenhuma dessas rotas ou telas existe. A
-navegação do topo mostra `Datasets` e `Modelo` desabilitados, marcados
+Fora de escopo, ainda não implementado: a tela de modelo (`/api/model/samples`)
+e a pasta `train/`. A navegação do topo mostra `Modelo` desabilitado, marcado
 `em breve`.
 
 Arquivos:
@@ -31,9 +32,14 @@ Arquivos:
 | `app/inference.py` | `Detector` — inferência ou passthrough, sem quebrar |
 | `app/collect.py` | máquina de estados da coleta, amostragem, fila de escrita e `session.json` |
 | `app/split.py` | split temporal por blocos contíguos e `split_manifest.json` |
-| `app/datasets.py` | versionamento `vMAJOR.MINOR`, layout em disco e uso de disco |
-| `app/templates/index.html` | painel |
-| `app/static/app.js`, `app/static/app.css` | comportamento e tema |
+| `app/datasets.py` | versionamento, layout em disco, leitura, divergência, exclusão e miniaturas |
+| `app/roboflow_upload.py` | envio ao Roboflow em thread, com retomada e cancelamento |
+| `app/templates/index.html` | tela Home |
+| `app/templates/datasets.html`, `app/templates/dataset.html` | lista e detalhe dos datasets |
+| `app/templates/_nav.html` | navegação, incluída pelas três telas |
+| `app/static/app.js` | comportamento da Home |
+| `app/static/datasets.js`, `app/static/dataset.js` | lista e detalhe |
+| `app/static/app.css` | tema, compartilhado pelas telas |
 | `run.sh` | sobe o uvicorn |
 | `tools/fake_stream.sh` | publica um `testsrc` no MediaMTX, para trabalhar sem drone |
 
@@ -41,7 +47,7 @@ Arquivos:
 
 ## 1. Rotas
 
-Dezesseis rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
+Trinta e uma rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
 
 | Método | Caminho | Corpo da requisição | Resposta |
 |---|---|---|---|
@@ -61,9 +67,29 @@ Dezesseis rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`
 | POST | `/api/collect/save` | — | `200 application/json` — `{ok, collect}` com `state: "salvando"`; o split roda depois da resposta |
 | POST | `/api/collect/dismiss` | — | `200 application/json` — `{ok, collect}`, volta de `salvo` a `ocioso` |
 | GET | `/api/collect/status` | — | `200 application/json` — só o bloco `collect` (ver §6) |
+| GET | `/datasets` | — | HTML da lista de datasets |
+| GET | `/datasets/{version}` | — | HTML do detalhe; a versão é injetada em `body[data-version]` |
+| GET | `/api/datasets` | — | `200 application/json` — `{datasets: [...]}`, da mais recente para a mais antiga (ver §8) |
+| GET | `/api/datasets/{version}` | — | `200 application/json` — resumo + `session`, `manifest`, `edits`, `images` |
+| GET | `/api/datasets/{version}/images/{split}` | — | `200 application/json` — `{version, split, count, images[]}` |
+| GET | `/api/datasets/{version}/image/{split}/{filename}` | — | `200 image/jpeg` — o arquivo original |
+| GET | `/api/datasets/{version}/thumb/{split}/{filename}` | — | `200 image/jpeg` — miniatura de 240 px, cacheada |
+| POST | `/api/datasets/{version}/images/preview-delete` | `{split, filenames[]}` | `200 application/json` — o que a exclusão faria |
+| DELETE | `/api/datasets/{version}/images` | `{split, filenames[]}` | `200 application/json` — `{ok, removed, removed_from_raw, counts, drift, event}` |
+| DELETE | `/api/datasets/{version}` | `{confirm: "v0.3"}` | `200 application/json`; `400` se a confirmação não bater |
+| POST | `/api/datasets/{version}/resplit` | `{margin?}` ou sem corpo | `200 application/json` — `{ok, counts, drift, manifest}` |
+| GET | `/api/roboflow/config` | — | `200 application/json` — se há SDK e se há chave; **nunca** a chave (ver §9) |
+| POST | `/api/roboflow/upload` | `{version, workspace, project, api_key?, batch_name?, tags?}` | `200 application/json` — `{ok, upload}` |
+| POST | `/api/roboflow/cancel` | — | `200 application/json` — `{ok, upload}` |
+| GET | `/api/roboflow/status` | — | `200 application/json` — estado, progresso e `config` |
 
 `GET /events` responde apenas a GET — qualquer outro método devolve `405` com
 header `allow: GET`.
+
+As rotas de dataset devolvem `404` para versão malformada e para versão
+inexistente, sem distinguir as duas: separá-las com códigos diferentes só
+ajudaria quem estivesse sondando o disco de fora. Erros de validação em ação
+(confirmação errada, nenhuma imagem válida, split que falhou) são `400`.
 
 ### GET /api/pipeline/status
 
@@ -109,7 +135,7 @@ Campos de `pipeline` (montados por `pipeline.snapshot()`):
 |---|---|---|
 | `busy` | bool | há um start/stop em execução neste instante |
 | `error` | string \| null | mensagem do último start/stop que falhou; zerada no início de cada start/stop |
-| `steps` | lista | relatório do último start/stop (ver §9). `[]` antes do primeiro |
+| `steps` | lista | relatório do último start/stop (ver §11). `[]` antes do primeiro |
 | `stream_path` | string | path **efetivo**: o nome real do path ativo no MediaMTX quando houver um; senão o configurado |
 | `configured_path` | string | o que `STREAM_PATH` ou o último start definiu |
 | `path_detected` | bool | `true` quando os dois divergem — o painel está exibindo um path que não foi ele quem escolheu |
@@ -127,7 +153,7 @@ verificações — continuam preenchidas com tudo parado.
 Os três URLs usam o path **efetivo**, não o configurado: com um path publicando
 sob outro nome, é o nome real que aparece. O sufixo do path é a única credencial
 do endpoint RTMP, e exibir o sufixo errado é exibir um endereço que não funciona.
-Ver §11.
+Ver §13.
 
 ### POST /api/pipeline/start
 
@@ -379,7 +405,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 | `resolution` | primeiro `tracks2[]` que tenha `codecProps.width` e `.height`, formatado `W×H` (separador é `×`, U+00D7); `null` se nenhum tiver |
 | `codecs` | `tracks2[].codec`; se `tracks2` estiver vazio, cai para `tracks[]` (MediaMTX antigo, sem dimensões) |
 | `bytes_received` | `bytesReceived` |
-| `mbps` | derivada calculada localmente (ver §8) |
+| `mbps` | derivada calculada localmente (ver §10) |
 | `stalled_for` | segundos desde a última variação de `bytesReceived` |
 | `readers` | `len(readers)` |
 | `source` | `source.type` (ex.: `"rtmpConn"`) |
@@ -417,7 +443,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 Note que `steps` continua mostrando `ok` nos quatro passos: é o relatório do
 último start, um registro histórico, não o estado atual. Quem informa o estado
 atual é `mediamtx.running` e `api_ok`. Note também que `rtmp_url` segue
-preenchido — ver §12.
+preenchido — ver §14.
 
 O texto entre parênteses em `stream.error` é o nome da classe da exceção httpx
 (`ConnectError`, `ReadTimeout`, `ConnectTimeout`…).
@@ -447,10 +473,16 @@ perdidos (não usamos `id:`/`Last-Event-ID`).
 
 ### Navegação (topo, acima da barra de estado)
 
-Uma faixa com a marca `M4TD` e três entradas: **Home** (atual, sublinhada em
-azul), **Datasets** e **Modelo**. As duas últimas não são links — são `<span>`
-a 50% de opacidade com o selo `em breve`, porque as telas ainda não existem e um
-link que devolve 404 é pior que uma aba apagada.
+Uma faixa com a marca `M4TD` e três entradas: **Home**, **Datasets** e
+**Modelo**. As duas primeiras são links, e a atual fica sublinhada em azul.
+**Modelo** ainda não é link — é um `<span>` a 50% de opacidade com o selo
+`em breve`, porque a tela não existe e um link que devolve 404 é pior que uma aba
+apagada.
+
+A faixa vive em `app/templates/_nav.html` e é incluída pelas três telas, com a
+variável `current` vinda do handler de cada rota. A barra de estado do voo (os
+quatro cartões e o indicador de SSE) fica **só na Home**: as telas de dataset não
+são de tempo real e não abrem `EventSource`.
 
 ### Barra de estado (topo, `position: sticky`)
 
@@ -459,7 +491,7 @@ clicável.** A cor nunca aparece sozinha — sempre acompanhada de texto.
 
 | Cartão | Rótulo fixo | Valor exibido | Cor da bolinha |
 |---|---|---|---|
-| Disponibilidade | `Disponibilidade` | `stream.label` (ver §8). Antes do primeiro frame: `conectando…` | `stream.level` |
+| Disponibilidade | `Disponibilidade` | `stream.label` (ver §10). Antes do primeiro frame: `conectando…` | `stream.level` |
 | MediaMTX | `MediaMTX` | `Parado` / `No ar` / `Container no ar, API muda` | vermelho se container parado; verde se container no ar **e** `api_ok`; amarelo se container no ar e API não responde |
 | Túnel | `Túnel` | `Parado` / o endereço (`bore.pub:49934`) / `Subindo…` | vermelho se sem processo; verde se processo e endereço; amarelo se processo sem endereço ainda |
 | Stream | `Stream` | nomes dos paths separados por `, ` — ou `Nenhum path ativo` | igual a `stream.level` |
@@ -696,10 +728,76 @@ estado por extenso — as classes e o limiar quando há modelo, o caminho onde
 largar os pesos quando não há, a mensagem de erro quando a carga falhou — e o
 botão `Recarregar pesos`.
 
+### Tela 2 — lista de datasets (`/datasets`)
+
+Uma tabela, da versão mais recente para a mais antiga, com colunas `Versão`,
+`Data`, `Duração`, `Imagens`, `Distribuição`, `Disco` e `Roboflow`.
+
+A distribuição é uma barra empilhada de três cores (train azul, valid verde, test
+âmbar) **com os números embaixo**: só a barra obrigaria o operador a estimar de
+olho quantas imagens tem cada partição.
+
+Sob a versão aparecem selos quando algo precisa de atenção — e só então:
+
+| Selo | Quando |
+|---|---|
+| `manifesto desatualizado` | `drift.stale` (§8) |
+| `sessão gravando` | a coleta foi interrompida e a versão nunca foi particionada |
+| `divergente do Roboflow` | `divergence.any` (§9) |
+
+Sem nenhum dataset, o lugar da tabela é ocupado por um estado vazio que explica
+que datasets nascem da coleta na Home, com um botão para lá — em vez de uma
+tabela de zero linhas.
+
+### Tela 2b — detalhe de um dataset (`/datasets/{version}`)
+
+Duas colunas (`1fr 380px`), como a Home.
+
+**Faixas de aviso**, no topo, quando existirem:
+
+- *Manifesto desatualizado* — a tabela `manifesto → disco` por partição com a
+  diferença destacada, as duas proporções lado a lado, e um botão
+  `Refazer o split a partir de raw/` dentro da própria faixa.
+- *Divergência com o Roboflow* — as contagens dos três casos de §9 e a frase que
+  fecha o assunto: excluir aqui não remove de lá.
+
+**Galeria.** Três abas com a contagem ao lado do nome. Grade de miniaturas de
+150 px mínimos, `loading="lazy"`, cada uma com caixa de seleção no canto
+superior esquerdo e, quando a imagem já subiu, o selo verde `enviada` no direito.
+Clicar na imagem abre o tamanho real num `<dialog>`; clicar fora fecha.
+
+A barra acima da grade tem `Selecionar tudo`, a contagem de selecionadas e o
+botão `Excluir N`, desabilitado com zero selecionadas. **A seleção não atravessa
+partições**: trocar de aba zera a lista, porque a exclusão é por partição.
+
+**Coluna da direita**, quatro painéis e uma zona de perigo: `Gravação` (dados do
+`session.json`), `Split` (manifesto resumido, avisos do split renderizados como
+na fatia 3 e o botão de refazer), `Enviar ao Roboflow` (formulário e progresso),
+`Histórico` (o `edits.json`, do mais recente para o mais antigo) e
+`Excluir dataset`, esta com borda vermelha.
+
+**Modais**, todos `<dialog>` nativos:
+
+| Modal | Confirmação |
+|---|---|
+| Excluir imagens | conta, aviso de que sai de `raw/` junto, aviso de quantas já subiram ao Roboflow, contagens e proporções depois |
+| Excluir dataset | exige digitar a versão exata; o botão só habilita com o texto igual |
+| Refazer o split | diz quantos quadros de `raw/` serão reparticionados e que as excluídas não voltam |
+| Enviar ao Roboflow | workspace, projeto, batch, tags, contagem por partição e quantas serão puladas |
+
+**Formulário de envio.** Workspace, projeto, batch (padrão: a versão) e tags
+(padrão: `versão, drone`). O campo de chave é `type="password"` e **só aparece
+quando não há chave configurada**; havendo, o lugar dele traz "Chave lida de
+.env. Não é exibida nem gravada em disco.". Durante o envio, o formulário dá
+lugar a uma barra de progresso, à linha de contagem (`137 de 205 enviadas · 2
+falharam · train/000138_t68.51.jpg · ~30 s restantes`) e ao botão de cancelar.
+
 ### Tema
 
 Escuro fixo (`#0d1117` de fundo), sem alternador. Layout em duas colunas
-(`1fr 380px`) que colapsa para uma coluna abaixo de 900 px de largura.
+(`1fr 380px`) que colapsa para uma coluna abaixo de 900 px de largura na Home e
+de 1000 px no detalhe do dataset. A lista de datasets é de coluna única, com
+largura máxima de 1280 px.
 
 ---
 
@@ -834,7 +932,7 @@ Capturado com um cliente MJPEG aberto e o `testsrc` publicando:
 | Campo | Como é medido |
 |---|---|
 | `connected` | há um `VideoCapture` aberto e entregando |
-| `source` | URL RTSP em uso, montada com o path efetivo (§11) |
+| `source` | URL RTSP em uso, montada com o path efetivo (§13) |
 | `error` | motivo da última desconexão; `null` quando conectado |
 | `reconnects` | quedas depois de uma conexão que já tinha funcionado |
 | `retry_in_s` | segundos até a próxima tentativa; `null` fora da espera |
@@ -1593,7 +1691,437 @@ quadros continuam em raw/ e o dataset pode ser reparticionado."
 
 ---
 
-## 8. Semáforo
+## 8. Datasets — `app/datasets.py`
+
+Leitura, edição e exclusão do que a coleta gravou. Além do versionamento e do
+uso de disco (§6), este módulo responde o que a tela de datasets precisa saber.
+
+### Quatro arquivos, quatro perguntas
+
+| Arquivo | Pergunta que responde | Quem escreve |
+|---|---|---|
+| `session.json` | como a gravação aconteceu | `app/collect.py` |
+| `split_manifest.json` | o que o split **decidiu** | `app/split.py` |
+| `edits.json` | o que mudou **depois** do split | `app/datasets.py` |
+| `roboflow.json` | o que foi enviado ao Roboflow | `app/roboflow_upload.py` |
+
+Cada um responde uma coisa e nenhum é reescrito para concordar com outro.
+
+### O manifesto é imutável entre splits
+
+**Nenhuma exclusão toca o `split_manifest.json`.** Só `split.run()` escreve nele.
+
+A tentação óbvia seria reescrevê-lo a cada imagem excluída, para que as
+contagens batessem com o disco. É a decisão errada: o manifesto deixaria de
+registrar o que o split fez e passaria a registrar o que sobrou, e aí não dá
+mais para reproduzir nem auditar o experimento — que é a única razão de ele
+existir. O manifesto descreve um **evento**; a pasta descreve um **estado**. São
+fatos diferentes.
+
+Em consequência:
+
+1. As contagens exibidas vêm sempre do disco, contadas na hora por
+   `live_counts()`. A lista e o detalhe nunca leem contagem do manifesto para
+   exibir.
+2. A divergência é calculada em toda leitura por `drift()` e mostrada na tela,
+   não escondida. Nada é gravado: `stale`, `by_split` e as proporções são
+   derivados.
+3. `edits.json` é append-only e explica a diferença. Sem ele, a distância entre
+   os 82 do manifesto e os 68 do disco não teria explicação daqui a três meses.
+
+Bloco `drift` real, depois de excluir 14 imagens de train:
+
+```json
+{
+  "stale": true,
+  "reason": "14 imagem(ns) excluída(s) depois do split",
+  "by_split": {"train": -14, "valid": 0, "test": 0},
+  "total": -14,
+  "proportions": {"train": 75.6, "valid": 10.0, "test": 14.4},
+  "manifest_proportions": {"train": 78.8, "valid": 8.7, "test": 12.5},
+  "manifest_counts": {"train": 82, "valid": 9, "test": 13}
+}
+```
+
+Sem manifesto — versão nunca particionada — `stale` é `true` com
+`reason: "sem manifesto — o split ainda não rodou nesta versão"` e `by_split`
+todo `null`.
+
+### Exclusão de imagens
+
+**Excluir apaga da partição e de `raw/`.** As duas coisas, sempre.
+
+Apagar só da partição faria o botão "Refazer o split a partir de `raw/`" —
+oferecido justamente porque as proporções mudaram — **ressuscitar todas as
+imagens excluídas**. O operador apagaria catorze quadros tremidos, clicaria em
+refazer o split para corrigir a proporção, e os catorze voltariam. Entre a
+irreversibilidade e um botão que desfaz o trabalho do operador, a
+irreversibilidade é o mal menor — e por isso o modal diz, em palavras, que não
+dá para desfazer.
+
+Verificado: 14 imagens excluídas de train saíram das duas pastas, e o resplit
+seguinte não trouxe nenhuma de volta.
+
+Quem quer outra distribuição não exclui imagem: refaz o split.
+
+**Defesa contra travessia de diretório.** Nenhum nome vindo do corpo ou da URL
+vira caminho diretamente. `preview_delete` intersecta a lista pedida com
+`os.listdir()` da partição, e só o que a listagem confirma é apagado.
+`image_path` rejeita nome que não seja basename, nome começado por ponto e
+qualquer resolvido cujo diretório-pai não seja exatamente a pasta da partição.
+`require_version` só aceita `^v\d+\.\d$`. Medido, todos devolvem `404`:
+
+```
+/api/datasets/v0.0/image/train/../../../../etc/passwd   404
+/api/datasets/v0.0/image/train/..%2F..%2Fsession.json   404
+/api/datasets/v0.0/image/train/.hidden                  404
+/api/datasets/..%2F..%2Fetc                             404
+/api/datasets/v0.0/images/raw                           404
+```
+
+### `POST /api/datasets/{version}/images/preview-delete`
+
+Chamada antes de abrir o modal. Diz o que a exclusão faria, e principalmente
+quantas das imagens já subiram ao Roboflow — informação que só o servidor tem,
+porque é ele quem lê o `roboflow.json`.
+
+```json
+{
+  "version": "v0.0", "split": "train",
+  "requested": 14, "count": 14, "targets": ["000011_t5.02.jpg", "…"],
+  "missing": [],
+  "uploaded_count": 0, "uploaded_files": [],
+  "counts_before": {"train": 82, "valid": 9, "test": 13, "raw": 124, "total": 104},
+  "counts_after":  {"train": 68, "valid": 9, "test": 13, "raw": 110, "total": 90},
+  "proportions_after": {"train": 75.6, "valid": 10.0, "test": 14.4}
+}
+```
+
+`missing` traz os nomes pedidos que não existem na partição — nomes velhos de
+uma aba aberta antes de outra exclusão. Eles não entram em `targets`, e a
+exclusão segue com o resto em vez de falhar inteira.
+
+### `edits.json`
+
+Append-only, escrito por `tmp` + `os.replace` sob um lock de processo.
+
+```json
+{"events": [
+  {"at": 1787747, "at_iso": "2026-08-26T12:22:59", "action": "delete_images",
+   "split": "valid", "count": 5, "files": ["000097_t48.03.jpg", "…"],
+   "removed_from_raw": 5,
+   "uploaded_before": ["000097_t48.03.jpg", "…"],
+   "errors": []},
+  {"at": …, "action": "resplit", "counts_before": {…}, "counts_after": {…},
+   "margin_requested": 5, "margin_applied": 5, "warnings": […]},
+  {"at": …, "action": "upload", "state": "parcial", "workspace": "acme",
+   "project": "drone-m4td", "batch_name": "v0.0", "tags": ["v0.0", "drone"],
+   "uploaded_total": 300, "uploaded_nesta_execucao": 300, "falhas": 200,
+   "error": "200 imagem(ns) falharam"}
+]}
+```
+
+`uploaded_before` é o que registra quais das imagens excluídas já estavam no
+Roboflow no momento da exclusão. É a única forma de explicar depois por que os
+dois lados divergem.
+
+### Refazer o split
+
+`POST /api/datasets/{version}/resplit` chama o **mesmo** `split.run()` da fatia
+3, sem variante nenhuma, sobre o `raw/` no estado atual. As partições são
+apagadas e reescritas, o manifesto é substituído pela decisão nova, o cache de
+miniaturas é descartado inteiro (as miniaturas são endereçadas por partição, e o
+resplit muda a partição das imagens) e um evento `resplit` entra no `edits.json`.
+Depois disso `drift.stale` volta a `false`.
+
+Medido: 124 quadros → exclusão de 14 → resplit de 110 → train 72 / valid 7 /
+test 11, `stale: false`, e nenhuma das 14 excluídas de volta.
+
+### Miniaturas
+
+`GET /api/datasets/{version}/thumb/{split}/{filename}` gera sob demanda e cacheia
+em `<versão>/.thumbs/<split>/<arquivo>`, invalidando por mtime. Largura de
+240 px, qualidade 72.
+
+Medido: 47.331 → 7.790 bytes, 960×720 → 240×180; a segunda requisição do mesmo
+arquivo responde em 17 ms. Mandar o JPEG inteiro duzentas vezes para montar uma
+grade desperdiça banda; gerar a miniatura a cada requisição desperdiça CPU.
+
+A escrita usa `cv2.imencode` + `write_bytes`, não `cv2.imwrite`: o `imwrite`
+escolhe o codec pela extensão do caminho, e o arquivo temporário termina em
+`.tmp` — com o `imwrite` ele falha com *could not find a writer for the
+specified extension*.
+
+`.thumbs` começa com ponto por dois motivos: `split.list_raw()` ignora nomes
+começados por ponto, e `dir_size()` pula o diretório, para que o tamanho
+exibido seja o do dataset e não o do cache.
+
+### Exclusão e resplit durante um envio
+
+Excluir imagens, excluir o dataset e refazer o split são recusados com `400`
+enquanto houver um envio **daquela versão** ao Roboflow em andamento:
+
+```
+há um envio de v0.0 ao Roboflow em andamento — cancele antes de refazer o split
+```
+
+Sem a guarda, o resplit moveria arquivos entre partições com o uploader no meio
+do caminho, e a exclusão do dataset deixaria o envio gravando um `roboflow.json`
+dentro de uma pasta recém-apagada. Um envio de **outra** versão não bloqueia
+nada.
+
+### Exclusão do dataset inteiro
+
+`DELETE /api/datasets/{version}` exige `{"confirm": "v0.3"}` com a versão
+exata; qualquer outra coisa devolve `400` com
+`para excluir, digite exatamente v0.0 — recebido 'v0.1'`. No cliente, o botão do
+modal só habilita quando o texto digitado bate exatamente. A resposta diz o que
+foi apagado:
+
+```json
+{"ok": true, "version": "v0.0",
+ "removed_counts": {"train": 74, "valid": 16, "test": 15, "raw": 105, "total": 105},
+ "removed_bytes": 9877988, "removed_human": "9.4 MB"}
+```
+
+### Bloco de resumo, um por versão
+
+Capturado de uma coleta real de 45 s:
+
+```json
+{
+  "version": "v0.0",
+  "created_at": 1787747191.9027865,
+  "created_at_iso": "2026-08-26T12:26:31",
+  "duration_s": 45.04,
+  "session_status": "salvo",
+  "interval_s": 0.5,
+  "counts": {"train": 58, "valid": 4, "test": 8, "raw": 90, "total": 70},
+  "bytes": 7487917,
+  "bytes_human": "7.1 MB",
+  "has_manifest": true,
+  "strategy": "temporal_contiguous",
+  "margin_applied": 5,
+  "drift": {"stale": false, "reason": null, "by_split": {"train": 0, "valid": 0, "test": 0},
+            "total": 0,
+            "proportions": {"train": 82.9, "valid": 5.7, "test": 11.4},
+            "manifest_proportions": {"train": 82.9, "valid": 5.7, "test": 11.4},
+            "manifest_counts": {"train": 58, "valid": 4, "test": 8}},
+  "roboflow": {"state": "nunca enviado", "uploaded": 0, "total": 0, "project": null,
+               "at": null, "at_iso": null, "resumable": false},
+  "divergence": {"any": false, "deleted_after_upload": 0, "discarded_after_upload": 0,
+                 "resplit_after_upload": 0, "deleted_files": [], "discarded_files": [],
+                 "moved_files": []}
+}
+```
+
+`session_status` diferente de `salvo` marca uma coleta interrompida — a versão
+tem `raw/` íntegro e nenhuma partição. `GET /api/datasets/{version}` devolve o
+mesmo bloco mais `session`, `manifest` (sem o mapeamento arquivo a arquivo),
+`edits`, `images` por partição e `uploaded_files`.
+
+---
+
+## 9. Roboflow — `app/roboflow_upload.py`
+
+Envio de um dataset para um projeto do Roboflow, preservando a partição.
+
+### O parâmetro que importa
+
+Cada imagem sobe com `split=` explícito:
+
+```python
+project.upload(
+    str(path),
+    split=split,          # o argumento que preserva a partição
+    batch_name=batch,     # a versão do dataset
+    tag_names=list(tags), # a versão + "drone"
+)
+```
+
+Sem `split=`, o Roboflow reparticiona por conta própria — e o split dele é
+aleatório, o que desfaz inteiro o trabalho da fatia 3: quadros vizinhos no tempo
+voltariam a cair em partições diferentes e o vazamento de treino na validação
+estaria de volta, agora invisível porque aconteceu do outro lado da rede.
+
+Por isso, **se o SDK instalado recusar o argumento `split`, a execução aborta**
+em vez de subir sem ele. Um `TypeError` cuja mensagem cite `split` vira
+`_SplitUnsupported`, o envio para no primeiro arquivo e o registro fica com
+`state: "erro"` e o texto que explica o que fazer. Um dataset com a partição
+errada é pior que nenhum dataset: parece pronto e mente na métrica.
+
+Verificado contra o SDK instalado — `roboflow 1.4.1`, assinatura de
+`Project.upload`:
+
+```
+['self', 'image_path', 'annotation_path', 'hosted_image', 'image_id', 'split',
+ 'num_retry_uploads', 'batch_name', 'tag_names', 'is_prediction', 'metadata', 'kwargs']
+```
+
+`batch_name` e `tag_names` levam a versão porque, meses depois, quando alguém
+perguntar de qual voo veio determinada imagem, é a única resposta possível.
+O padrão de `batch_name` é a versão; o de `tag_names` é `[versão, "drone"]`.
+
+### A chave
+
+Nunca é gravada em disco, nunca volta numa resposta de API, nunca entra em log.
+Ela entra pelo corpo do `POST /api/roboflow/upload`, atravessa para o SDK e
+morre ali. O `roboflow.json` não tem campo para ela.
+
+Ordem de resolução, medida:
+
+| Origem | Vence quando |
+|---|---|
+| `formulário` | o corpo traz `api_key` não vazia |
+| `ambiente` | existe `ROBOFLOW_API_KEY` em `os.environ` |
+| `.env` | o arquivo tem a linha `ROBOFLOW_API_KEY=…` |
+
+A leitura do `.env` é de **uma linha só**: o painel deliberadamente não chama
+`load_dotenv()`, porque carregar o arquivo inteiro mudaria o valor de outras
+variáveis já lidas na importação dos módulos (§12). `_key_from_dotenv()` procura
+a chave, ignora comentários e tira aspas.
+
+`GET /api/roboflow/config` informa se há SDK e se há chave — nunca a chave, nem
+mascarada:
+
+```json
+{"sdk_available": true, "sdk_error": null, "install_hint": "pip install roboflow",
+ "has_key": false, "key_source": null, "key_var": "ROBOFLOW_API_KEY",
+ "default_tags": ["drone"]}
+```
+
+A interface esconde o campo de senha quando `has_key` é verdadeiro e mostra
+"Chave lida de .env. Não é exibida nem gravada em disco.". O JS zera
+`#rf-key.value` assim que o envio começa, para não deixar a chave no DOM.
+
+A saída padrão do SDK é capturada com `contextlib.redirect_stdout` e descartada
+durante a construção do cliente e durante cada upload — nada que ele imprima
+chega ao log do painel.
+
+Verificado com uma chave inválida: `grep` por ela em `data/` e no log do painel
+não encontrou nenhuma ocorrência, e o `roboflow.json` gravado não a contém.
+
+### Import preguiçoso
+
+`import roboflow` acontece dentro da thread de envio, nunca no topo do módulo —
+mesmo tratamento dado ao `ultralytics` (§5). Sem o pacote instalado a aplicação
+sobe, a tela de datasets abre e o painel de envio explica:
+
+> O pacote roboflow não está instalado — o envio fica indisponível. Instale com:
+> pip install roboflow
+
+`roboflow` está no `requirements.txt`. Ele declara `opencv-python-headless>=4.10`
+e **não** arrasta `opencv-python` (a variante com GUI, que exige `libGL`) nem
+torch: a variante desktop fica atrás do extra `[desktop]`, que não é instalado.
+
+### Execução
+
+Uma thread (`roboflow-upload`), um envio por vez em todo o processo. `start()`
+recusa com `ok: false` se já houver um em andamento, se a versão não existir, se
+faltar workspace ou projeto, se não houver chave ou se não houver imagem nas
+três partições. Recusas medidas:
+
+```
+cancelar sem envio  → nenhum upload em andamento (ocioso)
+versão inexistente  → dataset v9.9 não existe
+sem workspace       → workspace e projeto são obrigatórios
+sem chave           → nenhuma chave disponível — informe no formulário ou defina ROBOFLOW_API_KEY
+```
+
+A lista de alvos é montada na ordem train, valid, test. Arquivos já presentes no
+`uploaded` do registro são pulados — é o que faz retomar.
+
+**Progresso.** `GET /api/roboflow/status` traz o bloco `progress`, e a tela de
+detalhe o consulta a cada segundo enquanto o envio estiver ativo:
+
+```json
+{"version": "v0.0", "total": 205, "pending": 205, "skipped": 0, "done": 137,
+ "failed": 2, "current": "000138_t68.51.jpg", "current_split": "train",
+ "started_at": 1787746986.2, "elapsed_s": 61.4, "eta_s": 30.5,
+ "message": "enviando para acme/drone-m4td"}
+```
+
+**Cancelamento** é cooperativo: um `threading.Event` conferido antes de cada
+arquivo. A imagem em voo termina, e o estado vira `cancelado` — retomável.
+
+**Falha parcial.** Uma falha isolada é registrada em `failures` e a execução
+continua. Dez falhas seguidas interrompem com `state: "erro"` e a última
+mensagem: o problema deixou de ser do arquivo, e insistir 500 vezes só demora
+mais. Se ao fim houver qualquer falha, o estado é `parcial`, e a lista de
+datasets mostra `parcial — 300 de 500 enviadas`. Enviar de novo retoma de onde
+parou.
+
+Estados possíveis: `ocioso`, `enviando`, `concluído`, `parcial`, `cancelado`,
+`erro`. Os três últimos são `resumable`.
+
+### `roboflow.json`
+
+Gravado a cada 5 imagens durante a execução e no fim, sempre atômico. Registro
+real de uma tentativa com chave inválida:
+
+```json
+{
+  "version": "v0.0",
+  "workspace": "nao-existe-xyz",
+  "project": "nao-existe-xyz",
+  "batch_name": "v0.0",
+  "tags": ["v0.0", "drone"],
+  "state": "erro",
+  "started_at": 1787746998.1,
+  "finished_at": 1787746998.4,
+  "error": "não foi possível abrir o projeto (RuntimeError: {\"error\":{\"message\":\"This API key does not exist (or has been revoked).\",\"status\":401,…}})",
+  "uploaded": {},
+  "failures": [],
+  "totals": {"selected": 90, "uploaded": 0, "failed": 0, "skipped": 90},
+  "runs": [{"at": 1787746998.4, "state": "erro", "uploaded_nesta_execucao": 0,
+            "falhas": 0, "puladas": 0, "duracao_s": 0.0, "error": "…"}]
+}
+```
+
+`uploaded` é um mapa `{arquivo: {"split", "at", "batch"}}`. **A chave é o nome do
+arquivo, não `split/arquivo`**: um resplit pode mudar a partição de uma imagem, e
+chavear por partição faria a retomada reenviá-la, criando duplicata no Roboflow.
+
+`runs` acumula um resumo por execução — é o que permite ler a história de um
+envio que foi parcial, retomado e concluído.
+
+### Divergência com o Roboflow
+
+Quando uma imagem sobe e depois é excluída aqui, os dois lados divergem em
+silêncio: o `roboflow.json` continua listando um arquivo que não existe mais no
+disco.
+
+**Nada é sincronizado nem apagado por API.** O Roboflow é a fonte de verdade
+para o que está lá; aqui só se torna visível que os dois lados deixaram de
+bater. `roboflow_divergence()` compara o registro com o disco e classifica em
+três casos, que têm causas bem diferentes:
+
+| Contador | Significa |
+|---|---|
+| `deleted_after_upload` | não está em nenhuma partição **nem** em `raw/` — foi excluída |
+| `discarded_after_upload` | não está em nenhuma partição **mas** continua em `raw/` — um resplit a jogou na margem de descarte |
+| `resplit_after_upload` | está numa partição **diferente** daquela em que subiu |
+
+Separar os dois primeiros não é preciosismo: contá-los juntos faria um resplit
+rotineiro — que sempre descarta ~4·M quadros nas fronteiras — ser reportado como
+exclusão em massa. Medido: depois de excluir 5 imagens já enviadas e refazer o
+split, a contagem correta é 5 excluídas e 4 na margem, não 9 excluídas.
+
+Três lugares mostram isso:
+
+1. **No modal de exclusão**, antes de qualquer coisa ser apagada:
+   > 5 destas já foram enviadas ao Roboflow. Excluir aqui não remove de lá —
+   > faça isso pela interface do Roboflow se necessário.
+2. **No `edits.json`**, no campo `uploaded_before` do evento.
+3. **Na tela de detalhe**, numa faixa amarela com as contagens, e como selo
+   `divergente do Roboflow` na lista.
+
+Na galeria, cada miniatura já enviada leva o selo `enviada` no canto — a
+divergência começa a ser visível antes de o operador clicar em excluir.
+
+---
+
+## 10. Semáforo
 
 Calculado em `Monitor._traffic_light` (`app/monitor.py`), avaliado a cada ciclo
 de polling (2 s). Constante única: `STALE_AFTER_S = 10.0`.
@@ -1670,7 +2198,7 @@ enquanto ainda chegam bytes.
 
 ---
 
-## 9. Passos do start
+## 11. Passos do start
 
 Quatro passos, nesta ordem, com estes nomes exatos no relatório:
 
@@ -1732,11 +2260,14 @@ sobrescreva a mensagem da colisão. A coleta segue a mesma convenção (§6).
 
 ---
 
-## 10. Variáveis de ambiente
+## 12. Variáveis de ambiente
 
 Nenhuma é obrigatória. Todas são lidas **na importação do módulo** — mudar depois
 exige reiniciar o painel. O `.env` do repositório **não** é carregado pelo painel
-(não há chamada a `load_dotenv` em `app/`).
+(não há chamada a `load_dotenv` em `app/`); a única exceção é `ROBOFLOW_API_KEY`,
+que `app/roboflow_upload.py` lê do arquivo linha a linha, no momento do uso, sem
+tocar em `os.environ` — carregar o `.env` inteiro mudaria o valor das outras
+variáveis já lidas na importação.
 
 | Variável | Padrão | Lida em | Efeito |
 |---|---|---|---|
@@ -1753,6 +2284,7 @@ exige reiniciar o painel. O `.env` do repositório **não** é carregado pelo pa
 | `WRITE_QUEUE_MAX` | `20` | `app/collect.py` | Tamanho da fila de escrita. Cheia, o quadro é descartado e contado em `io_dropped`. Cada item é um quadro decodificado — subir muito troca latência por memória. |
 | `WRITER_NICE` | `10` | `app/collect.py` | Incremento de `nice` aplicado por cada thread de escrita a si mesma. |
 | `COLLECT_JPEG_QUALITY` | `92` | `app/collect.py` | Qualidade do JPEG gravado no dataset. Mais alta que a do MJPEG de propósito: o MJPEG é para olhar, isto vira material de treino. |
+| `ROBOFLOW_API_KEY` | — | `app/roboflow_upload.py` | Chave do Roboflow. Lida de `os.environ` e, se não estiver lá, de uma **única linha** do `.env`. Nunca é gravada, exibida nem logada (§9). |
 | `OPENCV_FFMPEG_CAPTURE_OPTIONS` | `rtsp_transport;tcp\|stimeout;5000000` | `app/video.py` | Definida com `setdefault`, então um valor já exportado no ambiente vence. TCP evita perda de pacotes; o `stimeout` (5 s, em microssegundos) impede que um servidor morto deixe o `VideoCapture` pendurado na abertura. |
 
 Valores fixos no código, sem variável de ambiente: nome do container (`mtx`),
@@ -1773,9 +2305,13 @@ as opções de intervalo `(0.5, 1.0, 2.0, 5.0)`, e no split
 `DEFAULT_RATIOS = 70/15/15`, `DEFAULT_MARGIN = 5`,
 `MIN_FRAMES_FOR_SPLIT = 10`, `PROPORTION_TOLERANCE_PP = 5.0` e `MAX_MINOR = 9`.
 
+Dos datasets e do Roboflow: `THUMB_WIDTH = 240`, `THUMB_QUALITY = 72`,
+`THUMBS_DIR = ".thumbs"`, `MAX_CONSECUTIVE_FAILURES = 10`, `FLUSH_EVERY = 5` e
+`DEFAULT_TAGS = ("drone",)`.
+
 ---
 
-## 11. Reconciliação
+## 13. Reconciliação
 
 O painel **não guarda** o estado do pipeline em memória entre requisições. Toda
 resposta de `snapshot()` é medida no sistema no momento da chamada, o que
@@ -1823,7 +2359,7 @@ sistema, e não há de onde recuperá-la.
 
 ---
 
-## 12. Limitações conhecidas
+## 14. Limitações conhecidas
 
 **Endereço RTMP continua visível com o MediaMTX parado.** `rtmp_url` depende
 apenas do túnel: com `bore` vivo e container morto, o campo segue verde e o botão
@@ -1958,10 +2494,51 @@ pastas entre um split e outro se perde. Só `raw/` é preservado.
 porta pode iniciar, pausar e salvar uma coleta, e `GET /api/collect/status`
 devolve o caminho absoluto do dataset em disco.
 
-**Não implementado nestas fatias:** `/api/datasets*`, `/api/roboflow/*`,
-`/api/model/samples`, as telas de datasets e de modelo, a pasta `train/`, o
-formulário de configurações do item 3 da especificação original (path com
-gerador aleatório, transporte RTSP, HLS, resolução, FPS, qualidade JPEG) e a
-geração dinâmica do `mediamtx.yml` — o arquivo `config/mediamtx.yml` é usado
-como está. As proporções do split e a margem são constantes em `app/split.py`:
-`split.run()` já aceita `ratios` e `margin`, mas nenhuma rota os expõe.
+**A exclusão de imagens é irreversível e não tem desfazer.** É uma escolha, não
+um esquecimento: manter a imagem em `raw/` faria o "refazer o split"
+ressuscitá-la (§8). O que existe é o registro no `edits.json`, que diz o que foi
+apagado e quando — não o arquivo de volta.
+
+**Não há exclusão de quadros descartados na margem.** A galeria mostra só as três
+partições. Um quadro que o split jogou na margem continua em `raw/` e não tem
+como ser apagado pela interface; ele volta a ser candidato no próximo resplit.
+
+**A divergência com o Roboflow é detectada pelo nome do arquivo.** Se o mesmo
+nome for reenviado depois de uma exclusão — o que só acontece recoletando na
+mesma versão, hoje impossível —, os dois lados voltariam a "bater" sem que a
+imagem seja a mesma. Nada consulta a API do Roboflow para conferir: lá é a fonte
+de verdade, e aqui só se registra o que este lado fez.
+
+**O envio não verifica se o projeto do Roboflow já tem as imagens.** A retomada
+confia no `roboflow.json` local. Apagar esse arquivo e reenviar duplica tudo no
+Roboflow; enviar o mesmo dataset de duas máquinas diferentes também.
+
+**Um envio por processo, e ele não sobrevive ao reinício.** O estado do
+`Uploader` é memória. Reiniciar o painel no meio de um envio deixa o
+`roboflow.json` com `state: "enviando"` para sempre — a tela mostra `enviando`
+sem nada acontecendo, e o conserto é clicar em enviar de novo, que retoma pelo
+que já está registrado como enviado.
+
+**O `roboflow.json` guarda o nome de cada arquivo enviado.** Num dataset de 5000
+imagens são 5000 chaves; o arquivo passa de 1 MB e é reescrito inteiro a cada 5
+uploads. Funciona, mas é O(n²) em escrita ao longo de um envio grande.
+
+**Miniaturas são geradas na primeira visita.** Abrir a galeria de um dataset novo
+de 500 imagens dispara 500 decodificações; elas vão para o threadpool e não
+travam o event loop, mas a grade preenche devagar da primeira vez. Não há
+pré-geração ao salvar a coleta.
+
+**O cache de miniaturas não tem teto.** Cresce até ~8 KB por imagem e só é
+limpo por um resplit ou pela exclusão do dataset.
+
+**A lista relê o disco inteiro a cada carga.** `dir_size()` percorre a árvore de
+todas as versões e `live_counts()` faz um `scandir` por partição. Com dezenas de
+datasets grandes a tela começa a demorar; não há cache nem índice.
+
+**Não implementado nestas fatias:** `/api/model/samples`, a tela de modelo, a
+pasta `train/`, o formulário de configurações do item 3 da especificação
+original (path com gerador aleatório, transporte RTSP, HLS, resolução, FPS,
+qualidade JPEG) e a geração dinâmica do `mediamtx.yml` — o arquivo
+`config/mediamtx.yml` é usado como está. As proporções do split e a margem
+continuam constantes em `app/split.py`: `POST /resplit` expõe `margin`, mas
+`ratios` só existe na assinatura de `split.run()`.

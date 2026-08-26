@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ version }} — Datasets — M4TD</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-version="{{ version }}">
+
+{% include "_nav.html" %}
+
+<main class="detail">
+  <section id="ds-main">
+    <div class="page-head">
+      <h1><a class="crumb" href="/datasets">Datasets</a> <span class="sep">/</span> {{ version }}</h1>
+      <span class="page-sub" id="d-sub">carregando…</span>
+    </div>
+
+    <div class="error" id="d-error" hidden></div>
+
+    <div class="warning" id="d-drift" hidden></div>
+    <div class="warning" id="d-divergence" hidden></div>
+
+    <section class="panel">
+      <div class="tabs" id="d-tabs">
+        <button class="tab current" data-split="train">train <span>0</span></button>
+        <button class="tab" data-split="valid">valid <span>0</span></button>
+        <button class="tab" data-split="test">test <span>0</span></button>
+      </div>
+
+      <div class="gallery-bar">
+        <label class="inline"><input type="checkbox" id="g-all"> Selecionar tudo</label>
+        <span class="gallery-count" id="g-count">0 selecionadas</span>
+        <button id="btn-delete-selected" class="danger" disabled>Excluir selecionadas</button>
+      </div>
+
+      <div class="gallery" id="g-grid"></div>
+      <div class="empty small" id="g-empty" hidden>
+        Nenhuma imagem nesta partição.
+      </div>
+    </section>
+  </section>
+
+  <aside id="ds-side">
+    <section class="panel">
+      <h2>Gravação</h2>
+      <dl class="kv" id="d-session"></dl>
+    </section>
+
+    <section class="panel">
+      <h2>Split</h2>
+      <dl class="kv" id="d-manifest"></dl>
+      <div id="d-warnings"></div>
+      <div class="btn-row">
+        <button id="btn-resplit">Refazer o split a partir de raw/</button>
+      </div>
+      <div class="hint">
+        Reparticiona os <span id="d-raw-count">—</span> quadros que estão em
+        <code>raw/</code> agora. As pastas train, valid e test são apagadas e
+        reescritas, e o manifesto é substituído.
+      </div>
+    </section>
+
+    <section class="panel" id="rf-panel">
+      <h2>Enviar ao Roboflow</h2>
+      <div class="hint" id="rf-state">—</div>
+
+      <div id="rf-form">
+        <label class="field-row">
+          <span>Workspace</span>
+          <input type="text" id="rf-workspace" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field-row">
+          <span>Projeto</span>
+          <input type="text" id="rf-project" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field-row">
+          <span>Batch</span>
+          <input type="text" id="rf-batch" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field-row">
+          <span>Tags</span>
+          <input type="text" id="rf-tags" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field-row" id="rf-key-row">
+          <span>API key</span>
+          <input type="password" id="rf-key" autocomplete="off" placeholder="não configurada">
+        </label>
+        <div class="hint" id="rf-key-hint"></div>
+        <div class="btn-row">
+          <button id="btn-upload" class="primary">Enviar ao Roboflow</button>
+        </div>
+      </div>
+
+      <div id="rf-progress" hidden>
+        <div class="progress"><div class="progress-fill" id="rf-bar"></div></div>
+        <div class="progress-text" id="rf-text">—</div>
+        <div class="btn-row">
+          <button id="btn-upload-cancel" class="danger">Cancelar envio</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Histórico</h2>
+      <ol class="history" id="d-history"></ol>
+    </section>
+
+    <section class="panel danger-zone">
+      <h2>Excluir dataset</h2>
+      <p class="hint">
+        Apaga a versão inteira — <code>raw/</code>, as três partições, o
+        manifesto e o histórico. Não é possível desfazer.
+      </p>
+      <div class="btn-row">
+        <button id="btn-delete-dataset" class="danger">Excluir {{ version }}</button>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<dialog id="modal-delete-images">
+  <h3 id="mdi-title">Excluir imagens?</h3>
+  <p class="modal-lead" id="mdi-lead">—</p>
+  <div class="warning compact" id="mdi-uploaded" hidden></div>
+  <p class="modal-note" id="mdi-after">—</p>
+  <div class="modal-actions">
+    <button id="mdi-cancel">Cancelar</button>
+    <button id="mdi-ok" class="danger">Excluir</button>
+  </div>
+</dialog>
+
+<dialog id="modal-delete-dataset">
+  <h3>Excluir o dataset {{ version }}?</h3>
+  <p class="modal-lead" id="mdd-lead">—</p>
+  <label class="field-row column">
+    <span>Digite <code>{{ version }}</code> para confirmar</span>
+    <input type="text" id="mdd-confirm" autocomplete="off" spellcheck="false">
+  </label>
+  <div class="modal-actions">
+    <button id="mdd-cancel">Cancelar</button>
+    <button id="mdd-ok" class="danger" disabled>Excluir definitivamente</button>
+  </div>
+</dialog>
+
+<dialog id="modal-resplit">
+  <h3>Refazer o split?</h3>
+  <p class="modal-lead" id="mrs-lead">—</p>
+  <p class="modal-note">
+    As pastas train, valid e test são apagadas e reescritas a partir de
+    <code>raw/</code>, e o <code>split_manifest.json</code> é substituído pela
+    decisão nova. As imagens excluídas não voltam — elas saíram de
+    <code>raw/</code> também.
+  </p>
+  <div class="modal-actions">
+    <button id="mrs-cancel">Cancelar</button>
+    <button id="mrs-ok" class="primary">Refazer o split</button>
+  </div>
+</dialog>
+
+<dialog id="modal-upload">
+  <h3>Enviar ao Roboflow?</h3>
+  <p class="modal-lead" id="mup-lead">—</p>
+  <dl class="kv" id="mup-detail"></dl>
+  <p class="modal-note">
+    Cada imagem sobe com <code>split=</code> explícito, preservando a partição
+    temporal. Sem esse parâmetro o Roboflow reparticiona aleatoriamente e desfaz
+    o trabalho do split.
+  </p>
+  <div class="modal-actions">
+    <button id="mup-cancel">Cancelar</button>
+    <button id="mup-ok" class="primary">Enviar</button>
+  </div>
+</dialog>
+
+<dialog id="lightbox">
+  <img id="lb-img" alt="">
+  <div class="lb-bar">
+    <code id="lb-name">—</code>
+    <button id="lb-close">Fechar</button>
+  </div>
+</dialog>
+
+<script src="/static/dataset.js"></script>
+</body>
+</html>

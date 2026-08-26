@@ -1,9 +1,9 @@
 """Painel de controle do pipeline de drone.
 
 Estado do pipeline via SSE, start/stop com exibição do endereço RTMP, vídeo ao
-vivo em MJPEG com a inferência aplicada e coleta de quadros com split temporal
-ao salvar. Telas de datasets e de modelo, upload ao Roboflow e a pasta `train/`
-ficam para as fatias seguintes.
+vivo em MJPEG com a inferência aplicada, coleta de quadros com split temporal ao
+salvar, tela de datasets com galeria e edição, e upload ao Roboflow preservando
+a partição. A tela de modelo e a pasta `train/` ficam para as fatias seguintes.
 """
 
 from __future__ import annotations
@@ -13,16 +13,19 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from . import collect as collect_mod
+from . import datasets as datasets_mod
 from . import pipeline
+from . import roboflow_upload
 from .collect import collect
+from .roboflow_upload import uploader
 from .inference import detector
 from .monitor import monitor
 from .video import BOUNDARY, video
@@ -58,6 +61,29 @@ class CollectRequest(BaseModel):
     dedup: bool = collect_mod.DEFAULT_DEDUP
 
 
+class DeleteImagesRequest(BaseModel):
+    split: str
+    filenames: list[str]
+
+
+class DeleteDatasetRequest(BaseModel):
+    confirm: str = ""
+
+
+class ResplitRequest(BaseModel):
+    margin: int | None = None
+
+
+class UploadRequest(BaseModel):
+    version: str
+    workspace: str
+    project: str
+    # Nunca é gravada, logada nem devolvida: só atravessa para o SDK.
+    api_key: str | None = None
+    batch_name: str | None = None
+    tags: list[str] | None = None
+
+
 async def _state() -> dict:
     """snapshot() do pipeline usa subprocess — fora do event loop."""
     return {
@@ -73,7 +99,20 @@ async def _state() -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
-        request, "index.html", {"stream_path": pipeline.DEFAULT_STREAM_PATH}
+        request, "index.html",
+        {"stream_path": pipeline.DEFAULT_STREAM_PATH, "current": "home"},
+    )
+
+
+@app.get("/datasets", response_class=HTMLResponse)
+async def datasets_page(request: Request):
+    return templates.TemplateResponse(request, "datasets.html", {"current": "datasets"})
+
+
+@app.get("/datasets/{version}", response_class=HTMLResponse)
+async def dataset_page(request: Request, version: str):
+    return templates.TemplateResponse(
+        request, "dataset.html", {"current": "datasets", "version": version}
     )
 
 
@@ -213,3 +252,152 @@ async def collect_status():
     `docker inspect` do `pipeline.snapshot()` durante o voo.
     """
     return collect.status()
+
+
+# --- datasets ---------------------------------------------------------------
+
+
+def _dataset_guard(exc: datasets_mod.DatasetError) -> HTTPException:
+    """`DatasetError` cobre nome inválido e ausência; ambos são 404 para o cliente.
+
+    Distinguir "versão malformada" de "versão inexistente" com códigos
+    diferentes só ajudaria quem estivesse sondando o disco de fora.
+    """
+    return HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/datasets")
+async def api_datasets():
+    """Lista, da versão mais recente para a mais antiga.
+
+    Percorre diretórios e soma tamanhos — vai para o threadpool.
+    """
+    return {"datasets": await run_in_threadpool(datasets_mod.list_datasets)}
+
+
+@app.get("/api/datasets/{version}")
+async def api_dataset(version: str):
+    try:
+        return await run_in_threadpool(datasets_mod.detail, version)
+    except datasets_mod.DatasetError as exc:
+        raise _dataset_guard(exc) from exc
+
+
+@app.get("/api/datasets/{version}/images/{split}")
+async def api_dataset_images(version: str, split: str):
+    def read() -> dict:
+        base = datasets_mod.require_version(version)
+        datasets_mod.require_split(split)
+        uploaded = datasets_mod.uploaded_map(datasets_mod.read_upload_record(base))
+        files = datasets_mod.split_files(base, split)
+        return {
+            "version": version,
+            "split": split,
+            "count": len(files),
+            "images": [{"file": n, "uploaded": n in uploaded} for n in files],
+        }
+
+    try:
+        return await run_in_threadpool(read)
+    except datasets_mod.DatasetError as exc:
+        raise _dataset_guard(exc) from exc
+
+
+@app.get("/api/datasets/{version}/image/{split}/{filename}")
+async def api_dataset_image(version: str, split: str, filename: str):
+    try:
+        path = await run_in_threadpool(datasets_mod.image_path, version, split, filename)
+    except datasets_mod.DatasetError as exc:
+        raise _dataset_guard(exc) from exc
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/datasets/{version}/thumb/{split}/{filename}")
+async def api_dataset_thumb(version: str, split: str, filename: str):
+    """Miniatura, gerada sob demanda e cacheada em disco (decodifica — threadpool)."""
+    try:
+        path = await run_in_threadpool(datasets_mod.thumb_path, version, split, filename)
+    except datasets_mod.DatasetError as exc:
+        raise _dataset_guard(exc) from exc
+    return FileResponse(
+        path, media_type="image/jpeg", headers={"Cache-Control": "max-age=60"}
+    )
+
+
+@app.post("/api/datasets/{version}/images/preview-delete")
+async def api_preview_delete(version: str, body: DeleteImagesRequest):
+    """O que a exclusão faria, incluindo quantas já subiram ao Roboflow.
+
+    O modal chama isto antes de mostrar o botão de excluir: a contagem de
+    imagens já enviadas precisa vir do servidor, que é quem lê o roboflow.json.
+    """
+    try:
+        return await run_in_threadpool(
+            datasets_mod.preview_delete, version, body.split, body.filenames
+        )
+    except datasets_mod.DatasetError as exc:
+        raise _dataset_guard(exc) from exc
+
+
+@app.delete("/api/datasets/{version}/images")
+async def api_delete_images(version: str, body: DeleteImagesRequest):
+    """Exclui da partição **e** de `raw/`. Ver `datasets.delete_images`."""
+    try:
+        return await run_in_threadpool(
+            datasets_mod.delete_images, version, body.split, body.filenames
+        )
+    except datasets_mod.DatasetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/datasets/{version}")
+async def api_delete_dataset(version: str, body: DeleteDatasetRequest | None = None):
+    confirm = body.confirm if body else ""
+    try:
+        return await run_in_threadpool(datasets_mod.delete_dataset, version, confirm)
+    except datasets_mod.DatasetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/datasets/{version}/resplit")
+async def api_resplit(version: str, body: ResplitRequest | None = None):
+    """Refaz o split a partir de `raw/`. Mesmo `split.run()` da fatia 3."""
+    margin = body.margin if body else None
+    try:
+        return await run_in_threadpool(datasets_mod.resplit, version, margin)
+    except datasets_mod.DatasetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # SplitError e I/O
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- roboflow ---------------------------------------------------------------
+
+
+@app.get("/api/roboflow/config")
+async def api_roboflow_config():
+    """Se há SDK e se há chave — nunca a chave."""
+    return roboflow_upload.config()
+
+
+@app.post("/api/roboflow/upload")
+async def api_roboflow_upload(body: UploadRequest):
+    """Inicia o envio em thread separada e responde na hora.
+
+    `api_key` entra por aqui e não sai: não é gravada no `roboflow.json`, não
+    volta em nenhuma resposta e não aparece em log.
+    """
+    return await run_in_threadpool(
+        uploader.start, body.version, body.api_key, body.workspace,
+        body.project, body.batch_name, body.tags,
+    )
+
+
+@app.post("/api/roboflow/cancel")
+async def api_roboflow_cancel():
+    return uploader.cancel()
+
+
+@app.get("/api/roboflow/status")
+async def api_roboflow_status():
+    return uploader.status()

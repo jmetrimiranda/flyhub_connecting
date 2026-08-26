@@ -1,0 +1,7 @@
+{# Navegação comum às três telas. `current` vem do handler de cada rota. #}
+<nav id="nav">
+  <span class="brand">M4TD</span>
+  <a href="/" class="{% if current == 'home' %}current{% endif %}">Home</a>
+  <a href="/datasets" class="{% if current == 'datasets' %}current{% endif %}">Datasets</a>
+  <span class="soon" title="Chega na fatia 7">Modelo <em>em breve</em></span>
+</nav>

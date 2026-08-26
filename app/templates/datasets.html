@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Datasets — M4TD</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+{% include "_nav.html" %}
+
+<main class="single">
+  <section class="panel">
+    <div class="page-head">
+      <h1>Datasets</h1>
+      <span class="page-sub" id="ds-summary">carregando…</span>
+    </div>
+
+    <div class="empty" id="ds-empty" hidden>
+      <strong>Nenhum dataset ainda.</strong>
+      <p>
+        Os datasets são criados pela coleta, na tela Home: com os quatro
+        indicadores verdes, clique em <em>Coletar imagens do voo</em>. Ao salvar,
+        os quadros são particionados por blocos contíguos de tempo.
+      </p>
+      <a class="btn-link" href="/">Ir para a Home</a>
+    </div>
+
+    <div class="error" id="ds-error" hidden></div>
+
+    <table id="ds-table" hidden>
+      <thead>
+        <tr>
+          <th>Versão</th>
+          <th>Data</th>
+          <th>Duração</th>
+          <th>Imagens</th>
+          <th>Distribuição</th>
+          <th>Disco</th>
+          <th>Roboflow</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/static/datasets.js"></script>
+</body>
+</html>

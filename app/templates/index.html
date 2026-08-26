@@ -110,6 +110,70 @@
   </section>
 
   <aside id="controls">
+    <section class="panel" id="collect-panel">
+      <h2>Coleta de imagens</h2>
+
+      <div id="collect-idle">
+        <button id="btn-collect" class="primary">Coletar imagens do voo</button>
+        <div class="guard" id="collect-guard">verificando pré-condições…</div>
+      </div>
+
+      <div id="collect-active" hidden>
+        <div class="collect-state" id="collect-state">
+          <span class="dot"></span>
+          <strong id="collect-state-text">—</strong>
+          <code id="collect-version">—</code>
+        </div>
+
+        <div class="warning compact" id="collect-paused-reason" hidden></div>
+        <div class="warning compact" id="collect-impact" hidden></div>
+        <div class="error" id="collect-error" hidden></div>
+
+        <div class="counters">
+          <div class="counter">
+            <div class="counter-label">Quadros salvos</div>
+            <div class="counter-value" id="c-saved">0</div>
+          </div>
+          <div class="counter">
+            <div class="counter-label">Tempo decorrido</div>
+            <div class="counter-value" id="c-elapsed">—</div>
+          </div>
+          <div class="counter">
+            <div class="counter-label">Espaço usado</div>
+            <div class="counter-value" id="c-bytes">—</div>
+          </div>
+          <div class="counter">
+            <div class="counter-label">Fila de escrita</div>
+            <div class="counter-value" id="c-queue">—</div>
+          </div>
+        </div>
+
+        <div class="drops" id="c-drops">—</div>
+
+        <div class="btn-row" id="collect-buttons">
+          <button id="btn-pause">Pausar</button>
+          <button id="btn-resume" hidden>Continuar</button>
+          <button id="btn-save" class="primary">Salvar</button>
+        </div>
+        <div class="hint" id="collect-hint"></div>
+      </div>
+
+      <div id="collect-result" hidden>
+        <div class="collect-state saved">
+          <span class="dot"></span>
+          <strong>Salvo</strong>
+          <code id="r-version">—</code>
+        </div>
+        <div id="r-warnings"></div>
+        <div class="error" id="r-error" hidden></div>
+        <table class="split-table"><tbody id="r-counts"></tbody></table>
+        <div class="hint" id="r-detail">—</div>
+        <div class="btn-row">
+          <button id="btn-dismiss" class="primary">Fechar</button>
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <h2>Pipeline</h2>
       <div class="btn-row">
@@ -155,6 +219,44 @@
     </section>
   </aside>
 </main>
+
+<dialog id="modal-error">
+  <h3>Não é possível iniciar a coleta</h3>
+  <ul class="checklist" id="modal-error-list"></ul>
+  <div class="modal-actions">
+    <button id="btn-error-close" class="primary">Entendi</button>
+  </div>
+</dialog>
+
+<dialog id="modal-confirm">
+  <h3>Iniciar coleta</h3>
+  <p class="modal-lead">Será criada a versão <code id="confirm-version">—</code></p>
+
+  <label class="field-row">
+    <span>Intervalo de amostragem</span>
+    <select id="in-interval"></select>
+  </label>
+
+  <label class="field-row">
+    <span>Limite de quadros</span>
+    <span class="limit-box">
+      <input type="number" id="in-limit" min="1" step="1" value="500">
+      <label class="inline"><input type="checkbox" id="in-unlimited"> ilimitado</label>
+    </span>
+  </label>
+
+  <label class="field-row">
+    <span>Descartar quadros quase idênticos</span>
+    <input type="checkbox" id="in-dedup" checked>
+  </label>
+
+  <p class="modal-note" id="confirm-note">—</p>
+
+  <div class="modal-actions">
+    <button id="btn-confirm-cancel">Cancelar</button>
+    <button id="btn-confirm-ok" class="primary">Confirmar</button>
+  </div>
+</dialog>
 
 <script src="/static/app.js"></script>
 </body>

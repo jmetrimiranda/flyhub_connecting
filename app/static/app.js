@@ -8,6 +8,10 @@ let currentRtmp = null;
 let busy = false;
 let pending = false; // POST em voo — segura os botões até a resposta chegar
 
+let lastState = {};        // último payload do SSE — a guarda do cliente lê daqui
+let collectState = null;   // bloco `collect`, atualizado também pelo poll de 1 s
+let collectTimer = null;
+
 /* ---------- SSE ---------- */
 
 let source = null;
@@ -43,6 +47,7 @@ function setDot(id, level) {
 }
 
 function render(state) {
+  lastState = state;
   const p = state.pipeline || {};
   const s = state.stream || {};
 
@@ -89,6 +94,7 @@ function render(state) {
 
   renderConnection(state);
   renderModel(state.model || {});
+  renderCollect(state);
 
   busy = !!p.busy;
   $("btn-start").disabled = busy || pending;
@@ -334,5 +340,379 @@ function legacyCopy(text) {
   document.body.removeChild(ta);
   if (!ok) throw new Error("cópia bloqueada pelo navegador");
 }
+
+
+
+/* ---------- coleta ---------- */
+
+const COLLECT_DOT = {
+  ocioso: "", gravando: "green", pausado: "yellow", salvando: "yellow", salvo: "green",
+};
+
+/* A mesma guarda do servidor, avaliada no cliente.
+
+   Existe para o modal de erro abrir na hora, sem ida ao servidor, e para o
+   botão nunca disparar um start que vai falhar. O servidor revalida no
+   /api/collect/start: este payload pode ter dois segundos de idade. */
+function localChecks(state) {
+  const p = state.pipeline || {};
+  const s = state.stream || {};
+  const c = state.collect || {};
+  const disk = c.disk || {};
+  const paths = (s.paths || []).filter((x) => x.ready);
+  const mtxUp = !!(p.mediamtx && p.mediamtx.running);
+  const apiOk = !!s.api_ok;
+  const tun = p.tunnel || {};
+  const tunOk = !!(tun.running && tun.address);
+  const diskOk = disk.ok !== false && !disk.over_limit;
+
+  return [
+    {
+      key: "availability", label: "Disponibilidade",
+      ok: s.level === "green", level: s.level || "red",
+      detail: s.label || "—",
+      fix: s.level === "yellow"
+        ? "O drone está publicado mas sem enviar dados. Confira se o toggle do canal de encaminhamento está ligado no FlightHub."
+        : "Nenhum stream chegando. Suba o pipeline e publique o endereço RTMP no FlightHub.",
+    },
+    {
+      key: "mediamtx", label: "MediaMTX",
+      ok: mtxUp && apiOk, level: mtxUp && apiOk ? "green" : mtxUp ? "yellow" : "red",
+      detail: mtxUp && apiOk ? "no ar, API respondendo" : mtxUp ? "container no ar, API muda" : "parado",
+      fix: "Clique em Iniciar pipeline.",
+    },
+    {
+      key: "tunnel", label: "Túnel",
+      ok: tunOk, level: tunOk ? "green" : tun.running ? "yellow" : "red",
+      detail: tun.address || (tun.running ? "subindo…" : "parado"),
+      fix: "Clique em Iniciar pipeline para reabrir o túnel.",
+    },
+    {
+      key: "stream", label: "Stream",
+      ok: paths.length > 0, level: paths.length ? "green" : "red",
+      detail: paths.length ? paths.map((x) => x.name).join(", ") : "nenhum path ativo",
+      fix: "Confira o endereço no FlightHub e religue o toggle do canal.",
+    },
+    {
+      key: "disk", label: "Disco",
+      ok: diskOk, level: diskOk ? "green" : "red",
+      detail: disk.percent === null || disk.percent === undefined
+        ? "indisponível"
+        : disk.percent.toFixed(0) + "% usado · " + (disk.free_human || "—") + " livres",
+      fix: "Acima de " + (disk.limit_pct || 90) + "% a coleta não inicia. Libere espaço em data/.",
+    },
+  ];
+}
+
+function renderCollect(state) {
+  const c = state.collect || {};
+  collectState = c;
+  const session = c.session;
+  const st = c.state || "ocioso";
+
+  $("collect-idle").hidden = st !== "ocioso";
+  $("collect-active").hidden = !(st === "gravando" || st === "pausado" || st === "salvando");
+  $("collect-result").hidden = st !== "salvo";
+
+  if (st === "ocioso") {
+    const failed = localChecks(state).filter((x) => !x.ok);
+    const btn = $("btn-collect");
+    btn.classList.toggle("blocked", failed.length > 0);
+    $("collect-guard").textContent = failed.length
+      ? "Bloqueado: " + failed.map((x) => x.label.toLowerCase()).join(", ") +
+        ". Clique para ver o que falta."
+      : "Pré-condições atendidas. A coleta grava em data/datasets/ e particiona ao salvar.";
+    $("collect-guard").className = "guard" + (failed.length ? " bad" : " good");
+  }
+
+  if (session && st !== "salvo") renderCollectActive(c, session, st);
+  if (session && st === "salvo") renderCollectResult(session);
+
+  schedulePoll(st);
+}
+
+function renderCollectActive(c, session, st) {
+  const box = $("collect-state");
+  box.className = "collect-state " + st;
+  box.querySelector(".dot").className = "dot " + (COLLECT_DOT[st] || "");
+  $("collect-state-text").textContent = c.state_label.toUpperCase();
+  $("collect-version").textContent = session.version;
+
+  $("c-saved").textContent = session.limit
+    ? session.saved + " / " + session.limit
+    : String(session.saved);
+  $("c-elapsed").textContent = fmtDuration(session.elapsed_s);
+  $("c-bytes").textContent = session.bytes_human;
+  const q = c.queue || {};
+  $("c-queue").textContent = q.depth + " / " + q.max;
+
+  const drops = [];
+  if (session.dedup_skipped) drops.push(session.dedup_skipped + " quase idênticos");
+  if (session.stale_skipped) drops.push(session.stale_skipped + " sem quadro novo");
+  if (session.io_dropped) drops.push(session.io_dropped + " descartados por I/O");
+  if (session.write_errors) drops.push(session.write_errors + " erros de escrita");
+  $("c-drops").textContent = drops.length ? "Descartados: " + drops.join(" · ") : "Nenhum quadro descartado";
+  $("c-drops").classList.toggle("bad", session.io_dropped > 0 || session.write_errors > 0);
+
+  const pausedBox = $("collect-paused-reason");
+  pausedBox.hidden = !session.paused_reason;
+  pausedBox.textContent = session.paused_reason || "";
+
+  renderImpact(session.impact || {});
+
+  const errBox = $("collect-error");
+  errBox.hidden = !session.error;
+  errBox.textContent = session.error || "";
+
+  const saving = st === "salvando";
+  $("btn-pause").hidden = st !== "gravando";
+  $("btn-resume").hidden = st !== "pausado";
+  $("btn-pause").disabled = saving;
+  $("btn-resume").disabled = saving;
+  $("btn-save").disabled = saving;
+  $("btn-save").textContent = saving ? "Salvando…" : "Salvar";
+  $("collect-hint").textContent = saving
+    ? "Escoando a fila de escrita e particionando por blocos contíguos de tempo. Não feche a aba."
+    : "Salvar encerra a sessão e dispara o split temporal — não dá para voltar a gravar nesta versão.";
+}
+
+/* Impacto da coleta sobre o vídeo. Exibir o vídeo é a função principal da tela;
+   se a coleta derrubar o FPS além do limite, isso aparece aqui e não só num
+   relatório depois do voo. */
+function renderImpact(impact) {
+  const box = $("collect-impact");
+  if (!impact.available || !impact.degraded) {
+    box.hidden = true;
+    return;
+  }
+  const parts = [];
+  if (impact.capture_drop_pct !== null && impact.capture_drop_pct > 0)
+    parts.push("captura −" + impact.capture_drop_pct.toFixed(0) + "%");
+  if (impact.infer_drop_pct !== null && impact.infer_drop_pct > 0)
+    parts.push("inferência −" + impact.infer_drop_pct.toFixed(0) + "%");
+  box.hidden = false;
+  box.textContent =
+    "A coleta está degradando o vídeo: " + parts.join(", ") +
+    " em relação ao medido antes de começar (" +
+    impact.baseline.capture_fps.toFixed(1) + " fps de captura, " +
+    impact.baseline.infer_fps.toFixed(1) + " de inferência). Limite: " +
+    impact.threshold_pct + "%. Aumente o intervalo de amostragem ou pause a coleta.";
+}
+
+function renderCollectResult(session) {
+  const r = session.result;
+  $("r-version").textContent = session.version;
+
+  const errBox = $("r-error");
+  errBox.hidden = !session.error;
+  errBox.textContent = session.error || "";
+
+  const warnBox = $("r-warnings");
+  warnBox.replaceChildren();
+  const counts = $("r-counts");
+  counts.replaceChildren();
+
+  if (!r) {
+    $("r-detail").textContent =
+      "O split não produziu manifesto. Os quadros continuam em raw/ e o dataset pode ser reparticionado.";
+    return;
+  }
+
+  // Avisos do split em destaque: quem gravou 8 quadros por engano precisa ver
+  // na tela que não há valid nem test, não só no manifesto.
+  for (const w of r.warnings || []) {
+    const div = document.createElement("div");
+    div.className = w.level === "error" ? "error strong" : "warning compact";
+    div.textContent = (w.level === "error" ? "✕ " : "! ") + w.message;
+    warnBox.appendChild(div);
+  }
+
+  const rows = [
+    ["train", r.counts.train],
+    ["valid", r.counts.valid],
+    ["test", r.counts.test],
+    ["descartados na margem", r.counts.discarded],
+    ["total em raw/", r.total_raw],
+  ];
+  for (const [label, value] of rows) {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.textContent = label;
+    const td = document.createElement("td");
+    td.textContent = String(value);
+    if (["train", "valid", "test"].includes(label) && value === 0) td.className = "bad";
+    tr.append(th, td);
+    counts.appendChild(tr);
+  }
+
+  const span = r.time_span || {};
+  const gaps = (r.boundaries || [])
+    .filter((b) => b.gap_s !== null && b.gap_s !== undefined)
+    .map((b) => b.between.join("|") + " " + b.gap_s.toFixed(1) + " s");
+  $("r-detail").textContent =
+    "Blocos contíguos de tempo, margem " + r.margin_applied +
+    (r.margin_applied !== r.margin_requested ? " (pedida: " + r.margin_requested + ")" : "") +
+    " · " + fmtDuration(span.duration_s) + " de gravação" +
+    (gaps.length ? " · separação nas fronteiras: " + gaps.join(", ") : "") +
+    " · manifesto em " + r.manifest;
+}
+
+/* Enquanto há sessão aberta, os contadores vêm de /api/collect/status a cada
+   segundo. O SSE segue a 2 s: acelerá-lo dobraria a frequência dos
+   `docker inspect` do snapshot do pipeline durante o voo. */
+function schedulePoll(st) {
+  const wanted = st !== "ocioso";
+  if (wanted && collectTimer === null) {
+    collectTimer = setInterval(pollCollect, 1000);
+  } else if (!wanted && collectTimer !== null) {
+    clearInterval(collectTimer);
+    collectTimer = null;
+  }
+}
+
+async function pollCollect() {
+  try {
+    const c = await (await fetch("/api/collect/status")).json();
+    renderCollect({ ...lastState, collect: c });
+  } catch (err) {
+    /* o SSE cobre a próxima atualização */
+  }
+}
+
+/* ---------- modais ---------- */
+
+function renderChecklist(list, checks) {
+  list.replaceChildren();
+  for (const c of checks) {
+    const li = document.createElement("li");
+    li.className = c.ok ? "ok" : "fail";
+
+    const head = document.createElement("div");
+    head.className = "check-head";
+    const mark = document.createElement("span");
+    mark.className = "mark";
+    mark.textContent = c.ok ? "✓" : "✕";
+    const label = document.createElement("strong");
+    label.textContent = c.label;
+    const detail = document.createElement("span");
+    detail.className = "check-detail";
+    detail.textContent = c.ok ? "" : " — " + c.detail;
+    head.append(mark, label, detail);
+    li.appendChild(head);
+
+    if (!c.ok && c.fix) {
+      const fix = document.createElement("div");
+      fix.className = "check-fix";
+      fix.textContent = c.fix;
+      li.appendChild(fix);
+    }
+    list.appendChild(li);
+  }
+}
+
+function showErrorModal(checks) {
+  // falhas primeiro: é o que o operador precisa ler
+  const ordered = [...checks].sort((a, b) => Number(a.ok) - Number(b.ok));
+  renderChecklist($("modal-error-list"), ordered);
+  $("modal-error").showModal();
+}
+
+function showConfirmModal(pre) {
+  $("confirm-version").textContent = pre.next_version;
+
+  const select = $("in-interval");
+  select.replaceChildren();
+  for (const value of pre.defaults.interval_options) {
+    const opt = document.createElement("option");
+    opt.value = String(value);
+    opt.textContent = value + " s";
+    if (value === pre.defaults.interval) opt.selected = true;
+    select.appendChild(opt);
+  }
+  $("in-limit").value = pre.defaults.limit;
+  $("in-unlimited").checked = false;
+  $("in-limit").disabled = false;
+  $("in-dedup").checked = pre.defaults.dedup;
+
+  const r = pre.defaults.ratios;
+  $("confirm-note").textContent =
+    "Ao salvar, o dataset é particionado por blocos contíguos de tempo — " +
+    Math.round(r.train * 100) + "/" + Math.round(r.valid * 100) + "/" +
+    Math.round(r.test * 100) + " com margem de " + pre.defaults.margin +
+    " quadros nas fronteiras. Split aleatório colocaria quadros vizinhos em " +
+    "partições diferentes e vazaria treino na validação.";
+
+  $("modal-confirm").showModal();
+}
+
+$("in-unlimited").addEventListener("change", (ev) => {
+  $("in-limit").disabled = ev.target.checked;
+});
+
+$("btn-error-close").addEventListener("click", () => $("modal-error").close());
+$("btn-confirm-cancel").addEventListener("click", () => $("modal-confirm").close());
+
+/* ---------- ações da coleta ---------- */
+
+async function postCollect(url, body) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await resp.json();
+  if (data.collect) renderCollect({ ...lastState, collect: data.collect });
+  return data;
+}
+
+$("btn-collect").addEventListener("click", async () => {
+  const btn = $("btn-collect");
+
+  // Validação no cliente antes de qualquer requisição: o botão nunca dispara um
+  // start que vai falhar.
+  const checks = localChecks(lastState);
+  if (checks.some((c) => !c.ok)) {
+    showErrorModal(checks);
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    const pre = await (await fetch("/api/collect/preflight")).json();
+    if (!pre.ok) showErrorModal(pre.checks);
+    else showConfirmModal(pre);
+  } catch (err) {
+    $("collect-guard").textContent = "falha ao validar pré-condições: " + err;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("btn-confirm-ok").addEventListener("click", async () => {
+  const unlimited = $("in-unlimited").checked;
+  const body = {
+    interval: parseFloat($("in-interval").value),
+    limit: unlimited ? null : parseInt($("in-limit").value, 10),
+    dedup: $("in-dedup").checked,
+  };
+  $("btn-confirm-ok").disabled = true;
+  try {
+    const data = await postCollect("/api/collect/start", body);
+    $("modal-confirm").close();
+    // O servidor revalidou e discordou do cliente: mostra a lista dele.
+    if (!data.ok && data.preflight) showErrorModal(data.preflight.checks);
+    else if (!data.ok) showErrorModal(localChecks(lastState));
+  } finally {
+    $("btn-confirm-ok").disabled = false;
+  }
+});
+
+$("btn-pause").addEventListener("click", () => postCollect("/api/collect/pause"));
+$("btn-resume").addEventListener("click", () => postCollect("/api/collect/resume"));
+$("btn-save").addEventListener("click", () => {
+  $("btn-save").disabled = true;
+  postCollect("/api/collect/save");
+});
+$("btn-dismiss").addEventListener("click", () => postCollect("/api/collect/dismiss"));
 
 connect();

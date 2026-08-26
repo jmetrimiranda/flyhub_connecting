@@ -101,7 +101,7 @@ def effective_stream_path() -> str:
 
     O sufixo do path é a única credencial do endpoint RTMP. Assumir o
     `STREAM_PATH` padrão quando há outro publicando faz o painel mostrar um
-    endereço que não funciona — era o bug de §7 do SPEC_ATUAL.
+    endereço que não funciona — era uma das correções pendentes do SPEC_ATUAL.
     """
     return active_path_name() or _stream_path
 
@@ -225,7 +225,7 @@ def start(stream_path: str | None = None, config_path: Path | None = None) -> di
     with _lock:
         if _busy:
             # snapshot() também traz `error`; ele vem antes para não engolir esta
-            # mensagem — era o bug de §8 do SPEC_ATUAL.
+            # mensagem — era uma das correções pendentes do SPEC_ATUAL.
             return {"ok": False, **snapshot(), "error": "pipeline já está em operação"}
         _busy = True
 
@@ -268,7 +268,7 @@ def stop() -> dict:
     with _lock:
         if _busy:
             # snapshot() também traz `error`; ele vem antes para não engolir esta
-            # mensagem — era o bug de §8 do SPEC_ATUAL.
+            # mensagem — era uma das correções pendentes do SPEC_ATUAL.
             return {"ok": False, **snapshot(), "error": "pipeline já está em operação"}
         _busy = True
 

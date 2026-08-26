@@ -9,12 +9,16 @@ Escopo entregue:
   endereço RTMP e botão de copiar;
 - **fatia 1 da plataforma** — MJPEG em `/stream` com a inferência aplicada,
   detector abstraído (funciona sem pesos e sem torch) e painel de informações de
-  conexão.
+  conexão;
+- **fatias 2 e 3** — coleta de quadros com guarda de pré-condição, modais,
+  máquina de estados e gravação em `raw/`; e o split temporal por blocos
+  contíguos disparado ao salvar, com `split_manifest.json`.
 
-Fora de escopo, ainda não implementado: coleta de quadros (`/api/collect/*`),
-split temporal, telas de datasets e de modelo, upload para o Roboflow e a pasta
-`train/` — nenhuma dessas rotas ou telas existe. A navegação do topo mostra
-`Datasets` e `Modelo` desabilitados, marcados `em breve`.
+Fora de escopo, ainda não implementado: telas de datasets e de modelo
+(`/api/datasets*`, `/api/model/samples`), upload para o Roboflow
+(`/api/roboflow/*`) e a pasta `train/` — nenhuma dessas rotas ou telas existe. A
+navegação do topo mostra `Datasets` e `Modelo` desabilitados, marcados
+`em breve`.
 
 Arquivos:
 
@@ -25,6 +29,9 @@ Arquivos:
 | `app/monitor.py` | thread de polling da API do MediaMTX e semáforo |
 | `app/video.py` | leitura do RTSP, worker de inferência, contadores e MJPEG |
 | `app/inference.py` | `Detector` — inferência ou passthrough, sem quebrar |
+| `app/collect.py` | máquina de estados da coleta, amostragem, fila de escrita e `session.json` |
+| `app/split.py` | split temporal por blocos contíguos e `split_manifest.json` |
+| `app/datasets.py` | versionamento `vMAJOR.MINOR`, layout em disco e uso de disco |
 | `app/templates/index.html` | painel |
 | `app/static/app.js`, `app/static/app.css` | comportamento e tema |
 | `run.sh` | sobe o uvicorn |
@@ -34,7 +41,7 @@ Arquivos:
 
 ## 1. Rotas
 
-Nove rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
+Dezesseis rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
 
 | Método | Caminho | Corpo da requisição | Resposta |
 |---|---|---|---|
@@ -47,6 +54,13 @@ Nove rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
 | GET | `/api/stream/stats` | — | `200 application/json` — só o bloco `video` (ver §4) |
 | GET | `/api/model` | — | `200 application/json` — só o bloco `model` (ver §5) |
 | POST | `/api/model/reload` | — | `200 application/json` — o bloco `model` depois de forçar a recarga |
+| GET | `/api/collect/preflight` | — | `200 application/json` — as cinco pré-condições (ver §6) |
+| POST | `/api/collect/start` | `{interval, limit, dedup}` ou sem corpo | `200 application/json` — `{ok, collect}`; em recusa, `{ok:false, collect, preflight, error}` |
+| POST | `/api/collect/pause` | — | `200 application/json` — `{ok, collect}` |
+| POST | `/api/collect/resume` | — | `200 application/json` — `{ok, collect}` |
+| POST | `/api/collect/save` | — | `200 application/json` — `{ok, collect}` com `state: "salvando"`; o split roda depois da resposta |
+| POST | `/api/collect/dismiss` | — | `200 application/json` — `{ok, collect}`, volta de `salvo` a `ocioso` |
+| GET | `/api/collect/status` | — | `200 application/json` — só o bloco `collect` (ver §6) |
 
 `GET /events` responde apenas a GET — qualquer outro método devolve `405` com
 header `allow: GET`.
@@ -95,7 +109,7 @@ Campos de `pipeline` (montados por `pipeline.snapshot()`):
 |---|---|---|
 | `busy` | bool | há um start/stop em execução neste instante |
 | `error` | string \| null | mensagem do último start/stop que falhou; zerada no início de cada start/stop |
-| `steps` | lista | relatório do último start/stop (ver §7). `[]` antes do primeiro |
+| `steps` | lista | relatório do último start/stop (ver §9). `[]` antes do primeiro |
 | `stream_path` | string | path **efetivo**: o nome real do path ativo no MediaMTX quando houver um; senão o configurado |
 | `configured_path` | string | o que `STREAM_PATH` ou o último start definiu |
 | `path_detected` | bool | `true` quando os dois divergem — o painel está exibindo um path que não foi ele quem escolheu |
@@ -113,7 +127,7 @@ verificações — continuam preenchidas com tudo parado.
 Os três URLs usam o path **efetivo**, não o configurado: com um path publicando
 sob outro nome, é o nome real que aparece. O sufixo do path é a única credencial
 do endpoint RTMP, e exibir o sufixo errado é exibir um endereço que não funciona.
-Ver §9.
+Ver §11.
 
 ### POST /api/pipeline/start
 
@@ -234,8 +248,8 @@ e `pipeline.stop` são bloqueantes e chamam `subprocess`.
 
 **Formato.** Cada emissão é uma linha `data: <json>` seguida de linha em branco.
 Não há `event:`, `id:` nem `retry:`. O JSON é exatamente o mesmo objeto de
-`GET /api/pipeline/status`, com quatro blocos: `pipeline`, `stream`, `video`
-(§4) e `model` (§5).
+`GET /api/pipeline/status`, com cinco blocos: `pipeline`, `stream`, `video`
+(§4), `model` (§5) e `collect` (§6).
 
 **Headers da resposta** (capturados):
 
@@ -259,6 +273,18 @@ API do MediaMTX a cada `POLL_INTERVAL_S = 2.0` s e guarda o último resultado em
 memória; o SSE apenas lê esse cache. Já o bloco `pipeline` é medido na hora, a
 cada emissão. Consequência: um dado de `stream` pode ter até ~2 s de idade além
 do intervalo do SSE.
+
+`collect` também é lido de contadores em memória, com uma única exceção: o
+sub-bloco `disk` faz um `statvfs` a cada emissão, porque o disco é a única das
+cinco pré-condições que não chega ao cliente por outro bloco.
+
+**A coleta não acelera o SSE.** Durante uma sessão aberta, os contadores da
+gravação viriam com até 2 s de atraso. Em vez de encurtar o intervalo do SSE —
+o que dobraria a frequência dos `docker inspect` do `pipeline.snapshot()` no
+meio do voo — o JS liga um `setInterval` de 1 s sobre `GET /api/collect/status`
+enquanto `collect.state` for diferente de `ocioso`, e o desliga ao voltar a
+`ocioso`. O SSE continua a 2 s e permanece a fonte de verdade para uma segunda
+aba que abra no meio da gravação.
 
 `video` é lido de contadores em memória, sem I/O — a idade dele é a do próprio
 frame do SSE. `model` chama `detector.poll()`, que pode tocar o disco e, se
@@ -353,7 +379,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 | `resolution` | primeiro `tracks2[]` que tenha `codecProps.width` e `.height`, formatado `W×H` (separador é `×`, U+00D7); `null` se nenhum tiver |
 | `codecs` | `tracks2[].codec`; se `tracks2` estiver vazio, cai para `tracks[]` (MediaMTX antigo, sem dimensões) |
 | `bytes_received` | `bytesReceived` |
-| `mbps` | derivada calculada localmente (ver §6) |
+| `mbps` | derivada calculada localmente (ver §8) |
 | `stalled_for` | segundos desde a última variação de `bytesReceived` |
 | `readers` | `len(readers)` |
 | `source` | `source.type` (ex.: `"rtmpConn"`) |
@@ -391,7 +417,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 Note que `steps` continua mostrando `ok` nos quatro passos: é o relatório do
 último start, um registro histórico, não o estado atual. Quem informa o estado
 atual é `mediamtx.running` e `api_ok`. Note também que `rtmp_url` segue
-preenchido — ver §10.
+preenchido — ver §12.
 
 O texto entre parênteses em `stream.error` é o nome da classe da exceção httpx
 (`ConnectError`, `ReadTimeout`, `ConnectTimeout`…).
@@ -433,7 +459,7 @@ clicável.** A cor nunca aparece sozinha — sempre acompanhada de texto.
 
 | Cartão | Rótulo fixo | Valor exibido | Cor da bolinha |
 |---|---|---|---|
-| Disponibilidade | `Disponibilidade` | `stream.label` (ver §6). Antes do primeiro frame: `conectando…` | `stream.level` |
+| Disponibilidade | `Disponibilidade` | `stream.label` (ver §8). Antes do primeiro frame: `conectando…` | `stream.level` |
 | MediaMTX | `MediaMTX` | `Parado` / `No ar` / `Container no ar, API muda` | vermelho se container parado; verde se container no ar **e** `api_ok`; amarelo se container no ar e API não responde |
 | Túnel | `Túnel` | `Parado` / o endereço (`bore.pub:49934`) / `Subindo…` | vermelho se sem processo; verde se processo e endereço; amarelo se processo sem endereço ainda |
 | Stream | `Stream` | nomes dos paths separados por `, ` — ou `Nenhum path ativo` | igual a `stream.level` |
@@ -446,9 +472,9 @@ valores em `—`.
 
 ### Elementos clicáveis
 
-Existem cinco. Não há nenhum campo de formulário — a escolha de path,
-transporte, resolução e FPS é do item 3 da especificação original, fatia ainda
-não implementada.
+Existem doze, contando os do painel de coleta e os dos dois modais. Fora dos
+modais não há campo de formulário — a escolha de path, transporte, resolução e
+FPS é do item 3 da especificação original, fatia ainda não implementada.
 
 **1. `Iniciar pipeline`** (`#btn-start`, botão azul)
 
@@ -490,6 +516,100 @@ não implementada.
 - Abre `https://www.dji.com/flighthub-2` em nova aba (`target="_blank"`,
   `rel="noopener"`). Está ali junto do texto que explica que resolução e bitrate
   saem do encoder da aeronave e não têm controle no painel.
+
+**6 a 12** são do painel de coleta e dos modais — `Coletar imagens do voo`,
+`Pausar`, `Continuar`, `Salvar`, `Fechar`, `Confirmar`/`Cancelar` e `Entendi`.
+Descritos abaixo.
+
+### Painel "Coleta de imagens" (topo da coluna da direita)
+
+É o primeiro painel da coluna, acima do de pipeline: durante o voo é o que o
+operador usa, e os painéis de preparação ficam abaixo. Tem três aparências
+mutuamente exclusivas, escolhidas por `collect.state`.
+
+**Ocioso.** O botão azul `Coletar imagens do voo` — rótulo pelo que o operador
+controla, não pela implementação — e uma linha de guarda abaixo:
+
+- tudo verde: `Pré-condições atendidas. A coleta grava em data/datasets/ e
+  particiona ao salvar.`
+- algo vermelho ou amarelo: `Bloqueado: disponibilidade, stream. Clique para ver
+  o que falta.`, em âmbar, e o botão ganha borda amarela.
+
+O botão **continua clicável quando bloqueado**, de propósito. A especificação
+pede as duas coisas — modal de erro ao clicar com algum indicador fora do verde,
+e nada de "botão clicável e falhando depois" — e as duas convivem porque o clique
+bloqueado não dispara requisição nenhuma: `localChecks()` decide no cliente e
+abre o modal de erro direto. Um botão desabilitado não teria como explicar o
+motivo.
+
+**Gravando / pausado / salvando.** Uma faixa de estado com bolinha e a palavra em
+maiúsculas (`GRAVANDO` com bolinha verde pulsante, `PAUSADO` e `SALVANDO` em
+âmbar), a versão à direita, e:
+
+- até três caixas de aviso: o motivo da pausa (limite atingido, disco cheio), o
+  aviso de degradação do vídeo (§6) e a última mensagem de erro de escrita;
+- quatro contadores em grade 2×2: `Quadros salvos` (`40 / 500` quando há limite,
+  só o número quando ilimitado), `Tempo decorrido`, `Espaço usado`, `Fila de
+  escrita` (`0 / 20`);
+- uma linha de descartados: `Descartados: 29 quase idênticos · 3 sem quadro novo`,
+  em âmbar quando há descarte por I/O ou erro de escrita, e `Nenhum quadro
+  descartado` quando não há;
+- os botões. `Pausar` aparece só em `gravando`, `Continuar` só em `pausado`,
+  `Salvar` sempre. Em `salvando` os três ficam desabilitados e o de salvar vira
+  `Salvando…`;
+- uma linha de aviso: `Salvar encerra a sessão e dispara o split temporal — não
+  dá para voltar a gravar nesta versão.`
+
+**Salvo.** Faixa verde `SALVO` com a versão, os avisos do split em destaque, a
+tabela de contagens (`train`, `valid`, `test`, `descartados na margem`, `total em
+raw/` — com o valor em vermelho quando uma das três partições ficou em zero), uma
+linha de detalhe com a margem aplicada, a duração da gravação, o `gap_s` de cada
+fronteira e o caminho do manifesto, e o botão `Fechar`, que faz o `dismiss`.
+
+Os avisos do split são renderizados aqui, não só no manifesto: os de `level:
+error` em caixa vermelha com `✕`, os de `warn` em amarelo com `!`. Quem gravou 8
+quadros por engano lê na tela que o dataset não tem valid nem test.
+
+### Modais
+
+Dois `<dialog>` nativos, sem biblioteca. Fundo escurecido por `::backdrop`.
+
+**Modal de erro** — abre ao clicar em `Coletar imagens do voo` com alguma
+pré-condição fora do verde. Título `Não é possível iniciar a coleta` e a lista
+das cinco checagens, **as que falharam primeiro**: as que passaram ficam a 50% de
+opacidade com `✓`, e as que falharam trazem `✕`, o rótulo em vermelho, o detalhe
+e, embaixo, o que fazer:
+
+```
+✕ Stream — nenhum path ativo
+  Confira o endereço no FlightHub e religue o toggle do canal.
+
+✕ Disponibilidade — Sem stream
+  Nenhum stream chegando. Suba o pipeline e publique o endereço RTMP no FlightHub.
+
+✓ MediaMTX
+✓ Túnel
+✓ Disco
+```
+
+A lista vem de `localChecks()` no caso normal, e da resposta do servidor quando
+é o `POST /api/collect/start` que recusa — as duas têm o mesmo formato, então o
+renderizador é um só.
+
+**Modal de confirmação** — abre quando o `GET /api/collect/preflight` confirma
+que tudo está verde. Mostra a versão que será criada (`Será criada a versão
+v0.3`, em verde e destacada) e três campos, todos vindos de `preflight.defaults`:
+
+| Campo | Controle | Padrão |
+|---|---|---|
+| Intervalo de amostragem | `<select>` com 0.5 / 1 / 2 / 5 s | 2 s |
+| Limite de quadros | `<input type=number>` mais caixa `ilimitado`, que desabilita o número | 500 |
+| Descartar quadros quase idênticos | caixa de seleção | ligado |
+
+Abaixo, uma nota fixa explica o que vai acontecer ao salvar: partição em blocos
+contíguos 70/15/15 com margem de 5 quadros, e por que não é aleatória. Os botões
+são `Cancelar` e `Confirmar`; `Confirmar` dispara o `POST /api/collect/start` com
+os três valores.
 
 ### Campo do endereço RTMP
 
@@ -714,7 +834,7 @@ Capturado com um cliente MJPEG aberto e o `testsrc` publicando:
 | Campo | Como é medido |
 |---|---|
 | `connected` | há um `VideoCapture` aberto e entregando |
-| `source` | URL RTSP em uso, montada com o path efetivo (§9) |
+| `source` | URL RTSP em uso, montada com o path efetivo (§11) |
 | `error` | motivo da última desconexão; `null` quando conectado |
 | `reconnects` | quedas depois de uma conexão que já tinha funcionado |
 | `retry_in_s` | segundos até a próxima tentativa; `null` fora da espera |
@@ -846,7 +966,634 @@ passado ao `predict`.
 
 ---
 
-## 6. Semáforo
+## 6. Coleta — `app/collect.py`
+
+Gravação de quadros do voo em `data/datasets/<versão>/raw/`, com o split (§7)
+disparado ao salvar. Um único objeto global, `collect`, guarda o estado; não há
+banco — o SQLite continua sem entrar.
+
+### Máquina de estados
+
+Cinco estados. Toda transição passa por um método que valida a origem sob um
+`RLock`; não há transição implícita.
+
+```
+   ocioso ─start─► gravando ⇄ pausado ─save─► salvando ─► salvo ─dismiss─► ocioso
+                       │ pause/resume │                       │
+                       └──────────────┘                  (ou start direto)
+```
+
+| Estado | `state_label` | Significado |
+|---|---|---|
+| `ocioso` | `Ocioso` | nenhuma sessão. `session` é `null` |
+| `gravando` | `Gravando` | a amostradora está salvando quadros |
+| `pausado` | `Pausado` | sessão aberta, nada sendo salvo; o vídeo continua |
+| `salvando` | `Salvando` | amostragem parada, fila escoando, split em execução |
+| `salvo` | `Salvo` | split concluído; o resumo fica na tela até o `dismiss` |
+
+| De | Evento | Para | Guarda |
+|---|---|---|---|
+| `ocioso`, `salvo` | `start` | `gravando` | as cinco pré-condições revalidadas no servidor |
+| `gravando` | `pause` | `pausado` | — |
+| `pausado` | `resume` | `gravando` | disco abaixo do limite |
+| `gravando`, `pausado` | `save` | `salvando` | — |
+| `salvando` | interno | `salvo` | split terminou (com ou sem erro) |
+| `salvo` | `dismiss` | `ocioso` | — |
+
+`salvando` não estava no diagrama da especificação e foi acrescentado porque o
+split leva tempo: sem ele, ou a interface mentiria durante a cópia dos arquivos,
+ou o `POST /api/collect/save` bloquearia o event loop.
+
+Qualquer outro par (estado, evento) é recusado com `200` e `ok: false` — mesma
+convenção do pipeline. Respostas reais:
+
+```json
+{"ok": false, "collect": {"state": "gravando", "...": "..."}, "error": "não é possível continuar em gravando"}
+{"ok": false, "collect": {"state": "gravando", "...": "..."}, "error": "não é possível dispensar em gravando"}
+{"ok": false, "collect": {"state": "gravando", "...": "..."}, "error": "já existe uma coleta em andamento (gravando)"}
+```
+
+A chave `error` vem **depois** de `collect` no dicionário: invertida, o `error`
+do próprio status apagaria a mensagem da recusa. É o mesmo cuidado do
+`pipeline.start`.
+
+### Guarda de pré-condição
+
+`GET /api/collect/preflight` avalia cinco checagens. As quatro primeiras são os
+indicadores que já existiam na barra de estado; a quinta é o disco, incluída
+porque a especificação já exige parar a coleta acima de 90% e começar uma
+gravação que vai morrer em seguida não ajuda ninguém.
+
+| Chave | Verde quando |
+|---|---|
+| `availability` | `stream.level == "green"` |
+| `mediamtx` | container no ar **e** API respondendo |
+| `tunnel` | processo `bore` vivo **e** endereço lido do log |
+| `stream` | há ao menos um path com `ready: true` |
+| `disk` | uso abaixo de `DISK_LIMIT_PCT` (90%) |
+
+Resposta real com tudo verde (recortada):
+
+```json
+{
+  "ok": true,
+  "checks": [
+    {"key": "availability", "label": "Disponibilidade", "ok": true, "level": "green",
+     "detail": "Recebendo — 960×720 · 0.38 Mbps", "fix": null},
+    {"key": "mediamtx", "label": "MediaMTX", "ok": true, "level": "green",
+     "detail": "no ar, API respondendo", "fix": null},
+    {"key": "tunnel", "label": "Túnel", "ok": true, "level": "green",
+     "detail": "bore.pub:18473", "fix": null},
+    {"key": "stream", "label": "Stream", "ok": true, "level": "green",
+     "detail": "live/m4td", "fix": null},
+    {"key": "disk", "label": "Disco", "ok": true, "level": "green",
+     "detail": "41% usado · 16.8 GB livres", "fix": null}
+  ],
+  "failed": [],
+  "next_version": "v0.0",
+  "disk": {"ok": true, "percent": 41.2, "free_bytes": 18051837952, "free_human": "16.8 GB",
+           "total_bytes": 33636024320, "limit_pct": 90.0, "over_limit": false},
+  "defaults": {
+    "interval": 2.0, "interval_options": [0.5, 1.0, 2.0, 5.0],
+    "limit": 500, "dedup": true, "dedup_mad": 2.0,
+    "margin": 5, "ratios": {"train": 0.7, "valid": 0.15, "test": 0.15}
+  }
+}
+```
+
+Com o publicador desligado (medido, 12 s depois do `kill`):
+
+```json
+{
+  "ok": false,
+  "checks": [
+    {"key": "availability", "ok": false, "level": "red", "detail": "Sem stream",
+     "fix": "Nenhum stream chegando. Suba o pipeline e publique o endereço RTMP no FlightHub."},
+    {"key": "mediamtx", "ok": true,  "detail": "no ar, API respondendo"},
+    {"key": "tunnel",    "ok": true,  "detail": "bore.pub:18473"},
+    {"key": "stream", "ok": false, "level": "red", "detail": "nenhum path ativo",
+     "fix": "Confira o endereço no FlightHub e religue o toggle do canal."},
+    {"key": "disk", "ok": true, "detail": "41% usado · 16.8 GB livres"}
+  ]
+}
+```
+
+**Validação dupla.** O JS reimplementa as mesmas cinco checagens sobre o último
+payload do SSE (`localChecks()`) e abre o modal de erro sem ir ao servidor — é o
+que garante que o botão nunca dispare um start que vai falhar. O servidor
+revalida dentro do `start`, porque o payload do cliente pode ter dois segundos
+de idade e o disco pode ter enchido nesse intervalo. Resposta real de um start
+recusado:
+
+```json
+{
+  "ok": false,
+  "collect": {"state": "ocioso", "...": "..."},
+  "preflight": {"ok": false, "failed": [{"label": "Disponibilidade"}, {"label": "Stream"}]},
+  "error": "pré-condições não atendidas: Disponibilidade, Stream"
+}
+```
+
+Um start recusado **não cria diretório**: a versão só é criada depois de o
+preflight passar. Verificado — depois da recusa acima, `data/datasets/` continha
+apenas as versões anteriores.
+
+### Versionamento — `app/datasets.py`
+
+`vMAJOR.MINOR` com MINOR de 0 a 9 rolando para o próximo MAJOR:
+`v0.0 → v0.1 → … → v0.9 → v1.0`.
+
+A fonte da verdade é o disco, não um contador em memória: `next_version()` varre
+`data/datasets/` a cada chamada, aceita apenas diretórios que casem com
+`^v(\d+)\.(\d)$`, pega o maior par `(major, minor)` e incrementa. Sem nenhum
+diretório, devolve `v0.0`. Depois de calcular, ainda incrementa em laço enquanto
+o destino existir — uma pasta com nome fora do padrão é ignorada na varredura, e
+sem esse laço a coleta poderia começar a escrever dentro de um dataset alheio.
+
+`create_version()` usa `mkdir(exist_ok=False)`: duas coletas simultâneas na mesma
+versão falham em vez de se misturarem.
+
+### Amostragem
+
+Uma thread (`collect-sampler`) com laço de `TICK_S = 0.1 s` que acumula três
+cadências independentes: a amostragem no `interval` escolhido, as métricas de
+impacto a cada 1 s, a checagem de disco a cada 5 s e o flush do `session.json` a
+cada 2 s. O instante da próxima amostra é `next_sample += interval` — acumulado,
+não `now + interval`, para não derivar; se o atraso passar de um intervalo
+inteiro, ressincroniza.
+
+A cada amostragem:
+
+1. `video.latest()` — um **peek** no slot de saída do `video.py`, não um `take`.
+   Peek não marca o quadro como consumido, então a coleta não rouba quadros dos
+   clientes MJPEG nem infla o contador `dropped` do painel de conexão.
+2. Se não há quadro novo (`frame.seq` igual ao da última amostra), conta
+   `stale_skipped` e volta. É o que acontece com o RTSP caído ou reconectando: a
+   sessão fica aberta e volta a gravar sozinha quando o vídeo voltar.
+3. Deduplicação, quando ligada (abaixo).
+4. Atribui o índice, monta o nome e **submete** para a fila. A amostradora nunca
+   codifica nem escreve.
+
+**O quadro salvo é o cru.** `rendered.frame.image` — sem a sobreposição de FPS,
+resolução e caixas de detecção, que existe só para o operador olhar. Um dataset
+com HUD queimado nos pixels ensinaria o modelo a ler o HUD.
+
+**O tempo do nome vem do slot.** `t = frame.captured_at - captured_at do primeiro
+quadro salvo`. Deliberadamente **não** é `frame.elapsed`: `elapsed` é relativo a
+`session_started_at`, que o leitor rezera a cada reconexão do RTSP (§4), e uma
+reconexão no meio do voo faria os nomes voltarem para `t0.00` — quebrando o split
+temporal justamente no caso que a qualidade de canal em "Automático" torna comum.
+`captured_at` é monotônico e não rezera. Nenhum timestamp é gerado na hora de
+gravar.
+
+O nome é `{índice:06d}_t{t:.2f}.jpg` — `000001_t0.00.jpg`, `000241_t120.10.jpg`.
+O índice com seis dígitos faz a ordem lexicográfica coincidir com a temporal, o
+que permite ao split trabalhar com um `sorted(os.listdir())`.
+
+### Deduplicação
+
+Comparação com o último quadro **aceito para escrita**: converte para cinza,
+reduz para 128×128 com `INTER_AREA` e mede a diferença média absoluta
+(`cv2.absdiff(...).mean()`). Abaixo de `DEDUP_MAD = 2.0` (escala 0–255), o quadro
+é descartado e contado em `dedup_skipped`.
+
+A redução para tamanho fixo não é só economia: sem ela, uma troca de resolução no
+meio do voo faria o `absdiff` estourar por incompatibilidade de shape.
+
+O último quadro de referência só é atualizado quando o quadro entra na fila. Se
+a fila estiver cheia e o quadro for descartado, a referência continua sendo a do
+último que realmente foi gravado.
+
+Medido com cena parada (`color=c=blue`, o equivalente ao drone pairando), 15 s a
+0,5 s de intervalo: **1 quadro salvo, 29 descartados** em 30 amostragens. Com
+`testsrc` animado, 120 s a 0,5 s: **241 salvos, 0 descartados**.
+
+### A coleta não compete com o vídeo
+
+Exibir o vídeo é a função principal da tela. Quatro mecanismos garantem que a
+coleta seja secundária, e o quarto mede se garantiram.
+
+**1. A amostradora não faz I/O.** Decide, indexa e entrega. Encode e escrita são
+dos workers.
+
+**2. Fila limitada.** `queue.Queue(maxsize=WRITE_QUEUE_MAX)`, padrão 20. A
+submissão é `put_nowait`; em `queue.Full` o quadro é descartado na hora e contado
+em `io_dropped`, exibido na interface. Nunca bloqueia a amostragem e nunca cresce
+sem teto — cada item da fila é um quadro decodificado inteiro (a 960×720, ~2 MB),
+então uma fila ilimitada trocaria um problema de latência por um de memória.
+O índice **não** é consumido no descarte: o próximo quadro aceito reaproveita o
+mesmo número, e a numeração continua densa.
+
+Medido com a fila artificialmente cheia e sem workers: 50 amostragens em
+**0,8 ms**, `io_dropped = 50`, `next_index` intacto em 1, fila estável em 20/20.
+
+**3. Workers com prioridade rebaixada.** Duas threads fixas (`WRITE_WORKERS = 2`,
+constante, não configurável), cada uma chamando `os.nice(WRITER_NICE)` — padrão
+`+10` — na primeira linha do laço. No Linux, `nice()` vale para a thread que
+chama, não para o processo: medido, as threads de escrita ficam em `nice 10` e o
+processo principal segue em `0`. Na disputa por CPU com o encode do MJPEG, quem
+cede é a coleta.
+
+**4. Medição do impacto.** No `start`, o FPS de captura e de inferência é lido de
+`video.stats()` — a janela de taxa do leitor é de 3 s, então o valor já é a média
+do vídeo *antes* de a coleta existir. Durante a gravação, uma amostra por segundo
+alimenta uma janela de 15. Com pelo menos 5 amostras, `impact` compara a média
+atual com a referência; acima de `IMPACT_THRESHOLD_PCT = 20%` de queda,
+`degraded: true` acende um aviso amarelo no painel de coleta.
+
+Se não havia vídeo ativo no início (nenhum navegador aberto e nenhuma coleta), a
+referência não existe e o bloco diz isso em vez de inventar um número:
+
+```json
+{"available": false, "reason": "não havia vídeo ativo quando a coleta começou", "degraded": false}
+```
+
+**Medição de referência.** Coleta de 2 minutos a 0,5 s de intervalo, dedup ligada,
+sobre `testsrc` 960×720 a 30 fps, com um cliente MJPEG aberto o tempo todo e o
+detector em passthrough. Cada linha é a média de uma amostra por segundo de
+`GET /api/stream/stats`:
+
+| Janela | Amostras | FPS de captura | FPS de inferência | Latência |
+|---|---|---|---|---|
+| antes | 30 | 30,01 | 30,01 | 2,3 ms |
+| durante | 120 | 30,00 | 30,01 | 2,5 ms |
+| depois | 30 | 30,00 | 30,00 | 2,2 ms |
+
+Variação de **0,0%** nos dois FPS, contra o limite de 20%. O `peak_drop_pct`
+registrado pelo próprio servidor durante a coleta foi de **0,4%**. A sessão saiu
+com 241 quadros salvos, 10,2 MB, e **zero** descartes por I/O ou erros de escrita
+— a fila de escrita nunca passou de 0 de profundidade.
+
+O custo por quadro é um `imencode` a cada 0,5 s contra 30 por segundo do MJPEG:
+a 30 fps, a coleta responde por ~1,6% dos encodes. O resultado acima é o
+esperado; a instrumentação existe para o caso em que não seja — inferência real
+com torch, resolução maior, disco lento.
+
+### Escrita
+
+Cada job codifica em JPEG com `COLLECT_JPEG_QUALITY = 92` — mais alto que o 80 do
+MJPEG, porque o MJPEG é para olhar e isto vai virar dataset — e grava em
+`arquivo.jpg.tmp` seguido de `os.replace`. Um `kill -9` no meio nunca deixa um
+JPEG truncado em `raw/`; deixa, no máximo, um arquivo a menos.
+
+Falha de encode ou de escrita conta `write_errors` e registra a última mensagem
+em `session.error`, visível na interface. O índice já foi consumido, então
+sobra um buraco na numeração — inofensivo, porque o split lista os arquivos que
+existem e só exige que o índice seja crescente.
+
+### Limite e disco
+
+Ambos **pausam**, não salvam. Salvar dispara o split, e essa decisão é do
+operador; pausando, a sessão fica aberta e ele pode continuar se quiser.
+
+- Limite atingido: `paused_reason = "limite de 500 quadros atingido"`. A contagem
+  é por quadros aceitos para escrita (`next_index - 1`), não por `saved` — este é
+  incrementado pelos workers e chegaria atrasado ao limite.
+- Disco acima de 90%: `paused_reason = "disco acima de 90% — coleta interrompida"`.
+  O `resume` também recusa enquanto o disco não baixar.
+
+### `session.json`
+
+Gravado incrementalmente a cada 2 s e em toda transição de estado, sempre por
+`session.json.tmp` + `os.replace`. Uma queda no meio da escrita deixa o arquivo
+anterior intacto, nunca um JSON truncado.
+
+**O `session.json` é registro de auditoria, não fonte da verdade.** Tudo que o
+split precisa — índice e tempo relativo — está no nome de cada arquivo em `raw/`.
+Perder o último flush não compromete o dataset.
+
+Verificado com `kill -9` durante uma gravação: **25 arquivos em `raw/`, nenhum
+`.tmp` órfão**, `session.json` válido com `status: "gravando"` e 24 registros — o
+25º ainda não tinha entrado no flush. O `split.run()` rodado depois, direto sobre
+`raw/` e sem a aplicação no ar, recuperou os 25.
+
+Documento completo de uma sessão salva (o array `frames` foi cortado; ele traz um
+objeto `{index, file, t, epoch, seq, bytes}` por quadro):
+
+```json
+{
+  "version": "v0.0",
+  "status": "salvo",
+  "started_at": 1787743488.7434304,
+  "started_at_iso": "2026-08-26T11:24:48",
+  "ended_at": 1787743609.1316772,
+  "ended_at_iso": "2026-08-26T11:26:49",
+  "duration_s": 120.39,
+  "params": {"interval_s": 0.5, "limit": null, "dedup": true, "dedup_mad": 2.0, "jpeg_quality": 92},
+  "time_base": "t = frame.captured_at - captured_at do primeiro quadro salvo (relógio monotônico do leitor, imune a reconexão do RTSP)",
+  "counts": {"saved": 241, "dedup_skipped": 0, "stale_skipped": 0, "io_dropped": 0, "write_errors": 0},
+  "bytes": 10734645,
+  "paused_reason": null,
+  "error": null,
+  "impact": {
+    "available": true, "reason": null,
+    "baseline": {"available": true, "capture_fps": 30.1, "infer_fps": 30.0, "at": 1787743488.743511},
+    "current": {"capture_fps": 30.0, "infer_fps": 30.0},
+    "capture_drop_pct": 0.3, "infer_drop_pct": -0.0,
+    "worst_drop_pct": 0.3, "peak_drop_pct": 0.4,
+    "threshold_pct": 20.0, "degraded": false, "samples": 15
+  },
+  "stream": {"path": "live/m4td", "rtsp_url": "rtsp://localhost:8554/live/m4td", "resolution": "960×720"},
+  "model": {"loaded": false, "weights": null},
+  "frames": ["…241 registros…"]
+}
+```
+
+### Consumidor de vídeo
+
+O `start` registra a coleta em `video.consumers` com `kind="collect"`, e o
+`_finalize` a remove no fim. É o que mantém o RTSP aberto durante uma gravação
+sem nenhum navegador aberto.
+
+Verificado: com zero clientes MJPEG e o leitor já desconectado
+(`consumers.total == 0`, `connected: false`), iniciar a coleta reabriu o RTSP e
+gravou 25 quadros em 14 s, com `consumers = {"mjpeg": 0, "collect": 1, "total": 1}`.
+Os 3 `stale_skipped` do começo são o tempo de reabertura da conexão.
+
+### Bloco `collect` do payload
+
+Presente em `/events`, `/api/pipeline/status`, nas respostas de start/stop do
+pipeline e, sozinho, em `GET /api/collect/status`. Capturado durante uma
+gravação real:
+
+```json
+{
+  "state": "gravando",
+  "state_label": "Gravando",
+  "active": true,
+  "queue": {"depth": 0, "max": 20},
+  "workers": 2,
+  "disk": {"ok": true, "error": null, "percent": 41.3, "free_bytes": 18023632896,
+           "free_human": "16.8 GB", "total_bytes": 33636024320,
+           "limit_pct": 90.0, "over_limit": false},
+  "limits": {"interval_options": [0.5, 1.0, 2.0, 5.0], "dedup_mad": 2.0, "margin": 5,
+             "disk_limit_pct": 90.0, "impact_threshold_pct": 20.0},
+  "session": {
+    "version": "v0.4",
+    "dir": "/workspaces/flyhub_connecting/data/datasets/v0.4",
+    "started_at": 1787744004.2063031,
+    "started_at_iso": "2026-08-26T11:33:24",
+    "elapsed_s": 20.0,
+    "interval_s": 0.5,
+    "limit": 500,
+    "dedup": true,
+    "saved": 40,
+    "bytes": 1775831,
+    "bytes_human": "1.7 MB",
+    "dedup_skipped": 0,
+    "stale_skipped": 0,
+    "io_dropped": 0,
+    "write_errors": 0,
+    "last_file": "000040_t19.54.jpg",
+    "paused_reason": null,
+    "error": null,
+    "impact": {"...": "ver acima"},
+    "result": null
+  }
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `active` | `true` em `gravando`, `pausado` e `salvando` — há sessão em andamento |
+| `queue.depth` | itens esperando escrita neste instante; chegar perto de `max` é o sinal de que `io_dropped` vai começar |
+| `disk` | `statvfs` do sistema de arquivos de `data/datasets/` (ou do ancestral existente mais próximo) |
+| `session.saved` | quadros efetivamente gravados, incrementado pelos workers |
+| `session.stale_skipped` | amostragens sem quadro novo — leitor ocioso, RTSP caído ou reconectando |
+| `session.io_dropped` | quadros descartados por fila cheia |
+| `session.result` | `null` até o split terminar; depois, o resumo do manifesto (§7) |
+
+Com a sessão em `ocioso`, `session` é `null` e o resto do bloco continua
+presente — a interface precisa de `disk` e `limits` antes de qualquer coleta
+existir.
+
+---
+
+## 7. Split temporal — `app/split.py`
+
+### Por que não aleatório
+
+Quadros consecutivos de vídeo são quase idênticos. Um split aleatório coloca o
+quadro *N* em treino e o *N+1* em validação: o modelo memoriza em vez de
+generalizar, e a métrica de validação sobe para valores que não se sustentam em
+voo novo. É vazamento de dados, e é silencioso — nada no treino indica que
+aconteceu.
+
+A partição é por blocos contíguos de tempo, com uma margem de quadros descartados
+em cada fronteira:
+
+```
+[────────── train ──────────][── valid ──][── test ──]
+t=0                                               t=fim
+                            ↑            ↑
+                    margem: os N quadros de cada lado do corte
+                    saem das três partições e ficam só em raw/
+```
+
+### Onde o split acontece
+
+Em exatamente um lugar: `CollectService._finalize()`, na thread
+`collect-finalizer`. Nenhum outro ponto do sistema chama `split.run()`.
+
+```
+POST /api/collect/save          event loop — responde na hora, com state "salvando"
+  └─ collect.save()             gravando|pausado → salvando
+       └─ thread _finalize():
+            1. _stop_sampler.set() + sampler.join()      nenhum quadro novo entra
+            2. queue.join() + _stop_writers()         ◄── BARREIRA
+            3. session.json (status "salvando")
+            4. split.run(base, session=resumo)        ◄── AQUI
+            5. session.json (status "salvo") + resultado em memória
+            6. state → salvo; libera o consumidor "collect" do vídeo
+```
+
+A barreira do passo 2 é requisito de correção, não zelo: `split.run()` monta a
+partição a partir de `os.listdir(raw/)`, e um arquivo ainda na fila de escrita
+sairia calado do manifesto — presente em `raw/`, ausente das três partições.
+
+O passo 4 roda **em uma thread só, sem paralelismo**. O split acontece depois do
+Salvar, quando o operador já não depende do vídeo em tempo real; não vale
+disputar CPU com o encode do MJPEG por alguns segundos de cópia. Medido: **0,55 s
+para 241 quadros** (10,2 MB).
+
+`split.py` não importa `video` nem `collect`. Recebe um `Path` de versão e opera
+sobre o que está em `raw/` — é o que torna o `resplit` da fatia 4 um reuso de uma
+linha, permite reprocessar um dataset antigo e permite testar a regra sem drone,
+sem servidor e sem OpenCV.
+
+### O algoritmo
+
+Sobre `sorted(os.listdir(raw))`, filtrado por `^(\d+)_t(-?\d+\.\d+)\.jpg$` — o
+índice com seis dígitos faz a ordem lexicográfica ser a temporal. Arquivos fora
+do padrão são ignorados e viram um aviso.
+
+```
+c1 = int(n·0.70 + 0.5)              c2 = c1 + int(n·0.15 + 0.5)
+train = [0, c1−M)     valid = [c1+M, c2−M)     test = [c2+M, n)
+descartados = [c1−M, c1+M) ∪ [c2−M, c2+M)
+```
+
+`int(x + 0.5)` em vez de `round()`: `round()` arredonda 0,5 para o par mais
+próximo, e `round(2.5) == 2` deslocaria o corte de um quadro sem motivo.
+
+**Encolhimento da margem.** Toda partição precisa de ao menos um quadro depois de
+descontada a margem. `M` começa em `DEFAULT_MARGIN = 5` e desce até caber. Se nem
+`M = 0` couber, ou se houver menos de `MIN_FRAMES_FOR_SPLIT = 10` quadros, tudo
+vai para `train` e o manifesto registra um aviso de nível `error`. Nunca levanta
+exceção por dataset pequeno, e nunca entrega uma partição vazia em silêncio.
+
+Comportamento medido, com a proporção padrão:
+
+| n | M aplicada | train | valid | test | descartados | avisos |
+|---|---|---|---|---|---|---|
+| 8 | — | 8 | 0 | 0 | 0 | `dataset_curto` (error) |
+| 10 | 0 | 7 | 2 | 1 | 0 | `margem_reduzida` |
+| 25 | 1 | 17 | 2 | 2 | 4 | `margem_reduzida`, 3× `proporcao_desviada_*` |
+| 50 | 3 | 32 | 2 | 4 | 12 | `margem_reduzida`, 2× `proporcao_desviada_*` |
+| 240 | 5 | 163 | 26 | 31 | 20 | nenhum |
+| 1000 | 5 | 695 | 140 | 145 | 20 | nenhum |
+| 5000 | 5 | 3495 | 740 | 745 | 20 | nenhum |
+
+**Invariante verificado:** com `M > 0`, nenhum par de quadros de índice
+consecutivo cai em partições diferentes. Com `M = 0` isso deixa de valer — é
+exatamente o que o aviso `margem_reduzida` diz na tela, com essas palavras:
+"Com margem 0, o último quadro de treino e o primeiro de validação são vizinhos
+temporais — colete mais tempo antes de treinar."
+
+A margem custa proporção quando o dataset é pequeno: são sempre ~4·M quadros
+descartados, um número fixo que pesa muito em 50 quadros e nada em 5000. Por isso
+o desvio maior que 5 pontos percentuais em relação à proporção pedida também vira
+aviso, em vez de passar despercebido.
+
+### Avisos
+
+Lista de objetos `{code, level, message}`, com `level` em `warn` ou `error`.
+Vão para o manifesto **e** para a tela: o painel de "salvo" renderiza cada um,
+os de `error` em caixa vermelha e os de `warn` em amarelo. Quem gravou 8 quadros
+por engano vê na tela que não há valid nem test, sem precisar abrir o JSON.
+
+| `code` | `level` | Quando |
+|---|---|---|
+| `dataset_curto` | error | menos de 10 quadros; tudo foi para train |
+| `sem_particao_possivel` | error | nem com margem 0 cabem três partições |
+| `particao_vazia_<split>` | error | uma partição ficou vazia |
+| `margem_reduzida` | warn | a margem aplicada é menor que a pedida |
+| `proporcao_desviada_<split>` | warn | a proporção real ficou a mais de 5 p.p. da pedida |
+| `arquivos_ignorados` | warn | havia arquivos em `raw/` fora do padrão de nome |
+| `falha_ao_copiar` | error | ao menos um quadro não pôde ser copiado |
+
+### Escrita em disco
+
+`train|valid|test` são **apagados e recriados** antes da cópia — sem isso, um
+resplit deixaria órfãos da partição anterior. Os quadros são **copiados**, não
+movidos: `raw/` é mantido íntegro, que é o que permite refazer o split depois de
+excluir imagens na fatia 4.
+
+Resultado em disco de uma coleta de 2 min a 0,5 s:
+
+```
+data/datasets/v0.0/
+├── raw/               241 arquivos, de 000001_t0.00.jpg a 000241_t120.10.jpg
+├── train/images/      164
+├── valid/images/       26
+├── test/images/        31
+├── session.json
+└── split_manifest.json     26.640 bytes
+```
+
+Só `images/` é criado. Não há `labels/`: as anotações vêm do Roboflow, na fatia 5.
+
+### `split_manifest.json`
+
+Escrito por `tmp` + `os.replace`. Campos de topo:
+
+| Campo | Conteúdo |
+|---|---|
+| `version` | `v0.0` |
+| `created_at`, `created_at_iso` | epoch e ISO local |
+| `strategy` | sempre `"temporal_contiguous"` |
+| `reason` | por que a estratégia é essa, em texto |
+| `source` | `"raw"` |
+| `ratios` | proporções pedidas, normalizadas |
+| `margin_requested`, `margin_applied` | a margem pedida e a que coube |
+| `total_raw`, `counts` | total em `raw/` e contagem por partição, mais `discarded` e `kept` |
+| `time_span` | `first_t`, `last_t`, `duration_s` |
+| `boundaries` | uma entrada por fronteira, com o índice do corte, o último arquivo antes, o primeiro depois e o `gap_s` entre eles |
+| `warnings` | a lista acima |
+| `copy_errors` | falhas de cópia, arquivo a arquivo |
+| `session` | o `session.json` inteiro, menos o array `frames` |
+| `files` | `train`, `valid`, `test` e `discarded`, cada um com `{file, index, t}` — e `reason` nos descartados |
+
+As fronteiras do dataset de 241 quadros, com a margem cheia:
+
+```json
+"boundaries": [
+  {"between": ["train", "valid"], "cut_index": 169, "discarded_frames": 10,
+   "last_before": "000164_t81.50.jpg", "first_after": "000175_t87.07.jpg",
+   "t_before": 81.5, "t_after": 87.07, "gap_s": 5.57},
+  {"between": ["valid", "test"], "cut_index": 205, "discarded_frames": 10,
+   "last_before": "000200_t99.50.jpg", "first_after": "000211_t105.05.jpg",
+   "t_before": 99.5, "t_after": 105.05, "gap_s": 5.55}
+]
+```
+
+`gap_s` é o que se audita depois: 5,57 s entre o último quadro de treino e o
+primeiro de validação, num stream a 30 fps. Sem esse número, "o split foi
+temporal" é afirmação sem prova.
+
+Um descartado, com o motivo registrado:
+
+```json
+{"file": "000165_t82.03.jpg", "index": 165, "t": 82.03, "reason": "margem de fronteira train|valid"}
+```
+
+### Resumo na resposta da API
+
+`collect.status().session.result` traz um recorte do manifesto — tudo menos o
+mapeamento arquivo a arquivo, que num dataset grande dominaria o payload do SSE.
+Capturado de uma sessão curta, com a margem encolhida:
+
+```json
+{
+  "version": "v0.4",
+  "strategy": "temporal_contiguous",
+  "counts": {"train": 32, "valid": 2, "test": 4, "discarded": 12, "kept": 38},
+  "total_raw": 50,
+  "ratios": {"train": 0.7, "valid": 0.15, "test": 0.15},
+  "margin_requested": 5,
+  "margin_applied": 3,
+  "time_span": {"first_t": 0.0, "last_t": 25.62, "duration_s": 25.62},
+  "boundaries": [
+    {"between": ["train", "valid"], "cut_index": 35, "discarded_frames": 6,
+     "last_before": "000032_t15.53.jpg", "first_after": "000039_t19.06.jpg",
+     "t_before": 15.53, "t_after": 19.06, "gap_s": 3.53},
+    {"between": ["valid", "test"], "cut_index": 43, "discarded_frames": 6,
+     "last_before": "000040_t19.54.jpg", "first_after": "000047_t24.09.jpg",
+     "t_before": 19.54, "t_after": 24.09, "gap_s": 4.55}
+  ],
+  "warnings": [
+    {"code": "margem_reduzida", "level": "warn",
+     "message": "A margem de descarte caiu de 5 para 3 quadro(s): com 50 quadros, a margem pedida esvaziaria uma das partições. A separação entre as partições ficou menor que a pedida."},
+    {"code": "proporcao_desviada_train", "level": "warn",
+     "message": "train ficou com 84% dos quadros mantidos, não os 70% pedidos — a margem de descarte pesa mais quanto menor o dataset."},
+    {"code": "proporcao_desviada_valid", "level": "warn",
+     "message": "valid ficou com 5% dos quadros mantidos, não os 15% pedidos — a margem de descarte pesa mais quanto menor o dataset."}
+  ],
+  "manifest": "v0.4/split_manifest.json"
+}
+```
+
+### Falha no split
+
+Um `SplitError` ou um `OSError` durante o passo 4 não impede a transição para
+`salvo`: a sessão **foi** salva — os quadros estão em `raw/` —, e o que falhou
+foi a partição. `session.error` recebe a mensagem, `result` fica `null`, e o
+painel mostra a caixa vermelha com o texto "O split não produziu manifesto. Os
+quadros continuam em raw/ e o dataset pode ser reparticionado."
+
+---
+
+## 8. Semáforo
 
 Calculado em `Monitor._traffic_light` (`app/monitor.py`), avaliado a cada ciclo
 de polling (2 s). Constante única: `STALE_AFTER_S = 10.0`.
@@ -923,7 +1670,7 @@ enquanto ainda chegam bytes.
 
 ---
 
-## 7. Passos do start
+## 9. Passos do start
 
 Quatro passos, nesta ordem, com estes nomes exatos no relatório:
 
@@ -979,11 +1726,13 @@ passo que não encontrou nada para matar.
 
 `start` e `stop` compartilham a flag `_busy` protegida por um `threading.Lock`.
 Uma segunda chamada enquanto a primeira roda é recusada com `ok: false` sem
-executar nada (mas veja a limitação em §10 sobre a mensagem perdida).
+executar nada. A recusa devolve `{"ok": false, **snapshot(), "error": "pipeline
+já está em operação"}` — nessa ordem, para que a chave `error` do snapshot não
+sobrescreva a mensagem da colisão. A coleta segue a mesma convenção (§6).
 
 ---
 
-## 8. Variáveis de ambiente
+## 10. Variáveis de ambiente
 
 Nenhuma é obrigatória. Todas são lidas **na importação do módulo** — mudar depois
 exige reiniciar o painel. O `.env` do repositório **não** é carregado pelo painel
@@ -998,6 +1747,12 @@ exige reiniciar o painel. O `.env` do repositório **não** é carregado pelo pa
 | `MODEL_WEIGHTS` | `data/models/best.pt` (relativo à raiz) | `app/inference.py` | Arquivo de pesos. Não precisa existir: sem ele o detector fica em passthrough (§5). |
 | `MODEL_CONF` | `0.25` | `app/inference.py` | Limiar de confiança passado ao `predict` do Ultralytics. |
 | `JPEG_QUALITY` | `80` | `app/video.py` | Qualidade do JPEG do MJPEG, 0–100. |
+| `DATASETS_DIR` | `data/datasets` (relativo à raiz) | `app/datasets.py` | Onde as versões são criadas. O `statvfs` do bloco `disk` mede o sistema de arquivos desta pasta — ou do ancestral existente mais próximo, quando ela ainda não existe. |
+| `DISK_LIMIT_PCT` | `90` | `app/datasets.py` | Acima disto o preflight reprova, o `resume` recusa e uma coleta em andamento é pausada. |
+| `DEDUP_MAD` | `2.0` | `app/collect.py` | Diferença média absoluta (escala 0–255, sobre o cinza reduzido a 128×128) abaixo da qual dois quadros são considerados o mesmo. |
+| `WRITE_QUEUE_MAX` | `20` | `app/collect.py` | Tamanho da fila de escrita. Cheia, o quadro é descartado e contado em `io_dropped`. Cada item é um quadro decodificado — subir muito troca latência por memória. |
+| `WRITER_NICE` | `10` | `app/collect.py` | Incremento de `nice` aplicado por cada thread de escrita a si mesma. |
+| `COLLECT_JPEG_QUALITY` | `92` | `app/collect.py` | Qualidade do JPEG gravado no dataset. Mais alta que a do MJPEG de propósito: o MJPEG é para olhar, isto vira material de treino. |
 | `OPENCV_FFMPEG_CAPTURE_OPTIONS` | `rtsp_transport;tcp\|stimeout;5000000` | `app/video.py` | Definida com `setdefault`, então um valor já exportado no ambiente vence. TCP evita perda de pacotes; o `stimeout` (5 s, em microssegundos) impede que um servidor morto deixe o `VideoCapture` pendurado na abertura. |
 
 Valores fixos no código, sem variável de ambiente: nome do container (`mtx`),
@@ -1009,9 +1764,18 @@ raiz do repositório), log do túnel (`/tmp/bore.log`), porta local do túnel
 `RESOLUTION_WARNING_S = 300.0`, janela de taxa de 3 s) e de modelo
 (`MTIME_CHECK_EVERY_S = 1.0`).
 
+Da coleta e do split, também fixos: `WRITE_WORKERS = 2` (teto deliberado — mais
+threads disputariam CPU com o encode do MJPEG), `TICK_S = 0.1`,
+`METRICS_EVERY_S = 1.0`, `METRICS_WINDOW = 15`, `MIN_METRICS_SAMPLES = 5`,
+`IMPACT_THRESHOLD_PCT = 20.0`, `MIN_BASELINE_FPS = 1.0`,
+`DISK_CHECK_EVERY_S = 5.0`, `SESSION_FLUSH_EVERY_S = 2.0`, `DEDUP_SIZE = 128`,
+as opções de intervalo `(0.5, 1.0, 2.0, 5.0)`, e no split
+`DEFAULT_RATIOS = 70/15/15`, `DEFAULT_MARGIN = 5`,
+`MIN_FRAMES_FOR_SPLIT = 10`, `PROPORTION_TOLERANCE_PP = 5.0` e `MAX_MINOR = 9`.
+
 ---
 
-## 9. Reconciliação
+## 11. Reconciliação
 
 O painel **não guarda** o estado do pipeline em memória entre requisições. Toda
 resposta de `snapshot()` é medida no sistema no momento da chamada, o que
@@ -1059,7 +1823,7 @@ sistema, e não há de onde recuperá-la.
 
 ---
 
-## 10. Limitações conhecidas
+## 12. Limitações conhecidas
 
 **Endereço RTMP continua visível com o MediaMTX parado.** `rtmp_url` depende
 apenas do túnel: com `bore` vivo e container morto, o campo segue verde e o botão
@@ -1142,9 +1906,62 @@ o mtime não mudar, o `error` permanece; a saída é `POST /api/model/reload` ou
 tocar no arquivo. É intencional — repetir um import de torch que falha, a cada
 segundo, custa caro e não muda de resultado.
 
-**Não implementado nesta fatia:** `/api/collect/*`, `/api/datasets*`,
-`/api/roboflow/*`, `/api/model/samples`, as telas de datasets e de modelo, a
-pasta `train/`, o formulário de configurações do item 3 da especificação
-original (path com gerador aleatório, transporte RTSP, HLS, resolução, FPS,
-qualidade JPEG) e a geração dinâmica do `mediamtx.yml` — o arquivo
-`config/mediamtx.yml` é usado como está.
+**A coleta não sobrevive ao reinício do painel.** O estado é só memória. Uma
+sessão interrompida deixa `raw/` íntegro e um `session.json` com
+`status: "gravando"` — consistente e reprocessável —, mas o painel volta em
+`ocioso` e não oferece nada para retomar ou finalizar aquela versão. O caminho
+hoje é rodar `split.run()` à mão sobre a pasta; a tela de datasets da fatia 4 é
+o lugar natural para isso virar um botão. O mesmo vale para uma queda **durante**
+o split: `raw/` fica íntegro, mas `train|valid|test` podem ficar com uma cópia
+parcial e sem manifesto — o `split.run()` seguinte apaga e refaz as três pastas,
+então rodá-lo de novo é o conserto completo.
+
+**Uma coleta interrompida ocupa a versão.** `v0.2` com `status: "gravando"`
+continua em disco e nunca é reaproveitada: a próxima coleta cria `v0.3`. Não há
+limpeza automática, e sem a tela de datasets também não há como apagar pela
+interface.
+
+**Sem `interval`, `limit` e `dedup` por sessão salva no servidor.** Os três vêm
+do modal a cada início e são registrados no `session.json`, mas não há
+preferência persistida: toda coleta recomeça em 2 s / 500 / dedup ligada.
+
+**A dedup compara com o último quadro salvo, não com todos.** Um voo que passa
+duas vezes pelo mesmo enquadramento salva as duas — a comparação é sequencial, de
+propósito, porque um índice de todos os quadros vistos custaria memória e tempo
+crescentes durante a gravação.
+
+**O limiar de dedup é absoluto.** `DEDUP_MAD = 2.0` foi calibrado contra um
+publicador sintético. Ruído de sensor, compressão agressiva ou cena noturna
+mudam a escala, e não há calibração automática nem exibição do valor medido —
+só o contador de descartados na tela é que denuncia um limiar mal escolhido.
+
+**A margem de descarte distorce a proporção em datasets pequenos.** São sempre
+~4·M quadros fora, um número fixo: em 50 quadros isso é 24% do dataset e o
+`valid` fica com 5% em vez de 15%. Os avisos `proporcao_desviada_*` dizem isso na
+tela, mas o sistema não corrige sozinho nem sugere um `M` melhor.
+
+**O impacto sobre o vídeo só é medido se houver vídeo antes.** Iniciar a coleta
+sem nenhum navegador aberto deixa `impact.available: false` para a sessão
+inteira, porque a referência é lida uma única vez, no `start`. Não há
+recalibração posterior.
+
+**O split não valida o conteúdo das imagens.** Confia no nome do arquivo para
+índice e tempo. Um `raw/` montado à mão com tempos fora de ordem produziria um
+manifesto coerente com nomes incoerentes — os arquivos são ordenados por
+`(índice, t)`, e é o índice que manda.
+
+**`train/`, `valid/` e `test/` são apagados a cada split.** É o que torna o
+resplit idempotente, mas significa que qualquer coisa colocada dentro dessas
+pastas entre um split e outro se perde. Só `raw/` é preservado.
+
+**Sem autenticação também na coleta.** Como no resto do painel: quem alcança a
+porta pode iniciar, pausar e salvar uma coleta, e `GET /api/collect/status`
+devolve o caminho absoluto do dataset em disco.
+
+**Não implementado nestas fatias:** `/api/datasets*`, `/api/roboflow/*`,
+`/api/model/samples`, as telas de datasets e de modelo, a pasta `train/`, o
+formulário de configurações do item 3 da especificação original (path com
+gerador aleatório, transporte RTSP, HLS, resolução, FPS, qualidade JPEG) e a
+geração dinâmica do `mediamtx.yml` — o arquivo `config/mediamtx.yml` é usado
+como está. As proporções do split e a margem são constantes em `app/split.py`:
+`split.run()` já aceita `ratios` e `margin`, mas nenhuma rota os expõe.

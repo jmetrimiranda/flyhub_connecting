@@ -62,6 +62,10 @@ nav:
       - 3. Canal no FlightHub: guia/03-flighthub.md
       - 4. Captura no OpenCV: guia/04-captura.md
       - 5. Visualização: guia/05-visualizacao.md
+  - Plataforma:
+      - Visão geral: plataforma/index.md
+      - Como rodar: plataforma/rodar.md
+      - Hospedar na internet: plataforma/hospedar.md
   - Painel de controle:
       - Visão geral: painel/index.md
       - Referência dos controles: painel/controles.md

@@ -8,6 +8,13 @@
 </head>
 <body>
 
+<nav id="nav">
+  <span class="brand">M4TD</span>
+  <a href="/" class="current">Home</a>
+  <span class="soon" title="Chega na fatia 4">Datasets <em>em breve</em></span>
+  <span class="soon" title="Chega na fatia 7">Modelo <em>em breve</em></span>
+</nav>
+
 <header id="status-bar">
   <div class="status-card" id="card-availability">
     <span class="dot" id="dot-availability"></span>
@@ -46,15 +53,54 @@
 
 <main>
   <section id="viewer">
-    <div class="placeholder">
-      <div class="placeholder-title">Visualização ao vivo</div>
-      <p>Ainda não implementada — chega na fatia 3 (MJPEG em <code>/stream</code>).</p>
-      <p>Por enquanto, para conferir o vídeo:</p>
-      <ul>
-        <li>HLS: <code id="hls-url">—</code></li>
-        <li>RTSP: <code id="rtsp-url">—</code></li>
-      </ul>
+    <div id="res-warning" class="warning" hidden></div>
+
+    <div class="video-frame">
+      <img id="live" src="/stream" alt="Vídeo ao vivo com a inferência aplicada">
+      <div class="video-badge" id="model-badge">
+        <span class="dot"></span><span id="model-badge-text">verificando modelo…</span>
+      </div>
     </div>
+
+    <section class="panel" id="conn-panel">
+      <h2>Conexão</h2>
+      <div class="grid">
+        <div class="field">
+          <div class="field-label">Resolução do stream</div>
+          <div class="field-value" id="f-resolution">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Taxa</div>
+          <div class="field-value" id="f-mbps">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">FPS de captura</div>
+          <div class="field-value" id="f-capture-fps">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">FPS de inferência</div>
+          <div class="field-value" id="f-infer-fps">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Latência estimada</div>
+          <div class="field-value" id="f-latency">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Quadros perdidos</div>
+          <div class="field-value" id="f-dropped">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Tempo de stream</div>
+          <div class="field-value" id="f-uptime">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Modelo</div>
+          <div class="field-value" id="f-model">—</div>
+        </div>
+      </div>
+      <div class="hint" id="conn-detail">—</div>
+    </section>
+
     <table id="paths-table" hidden>
       <thead>
         <tr><th>Path</th><th>Pronto</th><th>Resolução</th><th>Taxa</th><th>Codecs</th><th>Parado há</th></tr>
@@ -88,6 +134,14 @@
         <strong>reedite o canal de encaminhamento</strong> e
         <strong>desligue e religue o toggle</strong> — sem isso o drone continua
         publicando no endereço antigo.
+      </div>
+    </section>
+
+    <section class="panel" id="model-panel">
+      <h2>Modelo</h2>
+      <div class="hint" id="model-detail">—</div>
+      <div class="btn-row">
+        <button id="btn-model-reload">Recarregar pesos</button>
       </div>
     </section>
 

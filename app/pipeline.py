@@ -77,11 +77,46 @@ def api_ready() -> bool:
         return False
 
 
-def rtmp_url(stream_path: str = DEFAULT_STREAM_PATH) -> str | None:
+def active_path_name() -> str | None:
+    """Nome do path publicando agora, lido do monitor.
+
+    Import local: `monitor` importa deste módulo, e no topo faria ciclo.
+    """
+    from .monitor import monitor
+
+    paths = monitor.snapshot().get("paths") or []
+    ready = [p for p in paths if p.get("ready")] or paths
+    if not ready:
+        return None
+    # Se o path configurado estiver entre os ativos, ele ganha; senão, o que
+    # está recebendo mais dados.
+    for path in ready:
+        if path.get("name") == _stream_path:
+            return _stream_path
+    return max(ready, key=lambda p: p.get("mbps") or 0).get("name")
+
+
+def effective_stream_path() -> str:
+    """O path que o painel deve exibir: o real, quando houver um.
+
+    O sufixo do path é a única credencial do endpoint RTMP. Assumir o
+    `STREAM_PATH` padrão quando há outro publicando faz o painel mostrar um
+    endereço que não funciona — era o bug de §7 do SPEC_ATUAL.
+    """
+    return active_path_name() or _stream_path
+
+
+def rtmp_url(stream_path: str | None = None) -> str | None:
     addr = tunnel_address()
     if not addr or not tunnel_running():
         return None
-    return f"rtmp://{addr}/{stream_path.lstrip('/')}"
+    path = (stream_path or effective_stream_path()).lstrip("/")
+    return f"rtmp://{addr}/{path}"
+
+
+def rtsp_url(stream_path: str | None = None) -> str:
+    path = (stream_path or effective_stream_path()).lstrip("/")
+    return f"rtsp://localhost:8554/{path}"
 
 
 # --- passos -----------------------------------------------------------------
@@ -189,7 +224,9 @@ def start(stream_path: str | None = None, config_path: Path | None = None) -> di
 
     with _lock:
         if _busy:
-            return {"ok": False, "error": "pipeline já está em operação", **snapshot()}
+            # snapshot() também traz `error`; ele vem antes para não engolir esta
+            # mensagem — era o bug de §8 do SPEC_ATUAL.
+            return {"ok": False, **snapshot(), "error": "pipeline já está em operação"}
         _busy = True
 
     _stream_path = (stream_path or DEFAULT_STREAM_PATH).strip().lstrip("/")
@@ -230,7 +267,9 @@ def stop() -> dict:
 
     with _lock:
         if _busy:
-            return {"ok": False, "error": "pipeline já está em operação", **snapshot()}
+            # snapshot() também traz `error`; ele vem antes para não engolir esta
+            # mensagem — era o bug de §8 do SPEC_ATUAL.
+            return {"ok": False, **snapshot(), "error": "pipeline já está em operação"}
         _busy = True
 
     _last_error = None
@@ -262,16 +301,19 @@ def snapshot() -> dict:
     mtx_up = container_running()
     tun_up = tunnel_running()
     addr = tunnel_address() if tun_up else None
-    url = f"rtmp://{addr}/{_stream_path}" if addr else None
+    path = effective_stream_path()
+    url = f"rtmp://{addr}/{path}" if addr else None
 
     return {
         "busy": _busy,
         "error": _last_error,
         "steps": list(_steps),
-        "stream_path": _stream_path,
+        "stream_path": path,
+        "configured_path": _stream_path,
+        "path_detected": path != _stream_path,
         "mediamtx": {"running": mtx_up, "container": CONTAINER},
         "tunnel": {"running": tun_up, "address": addr},
         "rtmp_url": url,
-        "rtsp_url": f"rtsp://localhost:8554/{_stream_path}",
-        "hls_url": f"http://localhost:8888/{_stream_path}",
+        "rtsp_url": f"rtsp://localhost:8554/{path}",
+        "hls_url": f"http://localhost:8888/{path}",
     }

@@ -103,9 +103,6 @@ main {
   min-height: 320px;
 }
 
-.placeholder { color: var(--fg-dim); }
-.placeholder-title { color: var(--fg); font-weight: 600; margin-bottom: 6px; }
-.placeholder ul { margin: 6px 0 0; padding-left: 18px; }
 
 #paths-table {
   width: 100%;
@@ -256,3 +253,136 @@ code {
   padding: 8px 10px;
 }
 .reminder strong { color: #f2cc60; }
+
+
+/* --- navegação --- */
+
+#nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 14px;
+  background: #0b0f14;
+  border-bottom: 1px solid var(--border);
+}
+
+#nav .brand {
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--blue);
+  margin-right: 14px;
+}
+
+#nav a, #nav .soon {
+  padding: 11px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--fg-dim);
+  border-bottom: 2px solid transparent;
+}
+
+#nav a.current { color: var(--fg); border-bottom-color: var(--blue); }
+#nav a:hover { color: var(--fg); }
+#nav .soon { opacity: .5; cursor: default; }
+#nav .soon em {
+  font-style: normal;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+
+/* --- vídeo --- */
+
+.video-frame {
+  position: relative;
+  background: #05080b;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  line-height: 0;
+}
+
+#live { width: 100%; height: auto; display: block; }
+
+.video-badge {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(5, 8, 11, .82);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  line-height: 1.2;
+  color: var(--fg-dim);
+}
+
+.video-badge.green  { color: var(--green);  border-color: #2d5a34; }
+.video-badge.green .dot  { background: var(--green); }
+.video-badge.yellow { color: #e3b341; border-color: #4a3d14; }
+.video-badge.yellow .dot { background: var(--yellow); }
+.video-badge.red    { color: #ffb4ab; border-color: #6e2c2c; }
+.video-badge.red .dot    { background: var(--red); }
+
+/* Aviso de troca de resolução. Sem botão de fechar: enquanto a resolução
+   oscila o problema segue ativo, e some sozinho após 5 min sem nova troca. */
+.warning {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #f2cc60;
+  background: #2b2413;
+  border: 1px solid #4a3d14;
+  border-left: 3px solid var(--yellow);
+}
+
+/* --- painel de conexão --- */
+
+#conn-panel { margin-top: 14px; padding: 14px; background: var(--panel-2); }
+
+#conn-panel .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.field { background: var(--panel); padding: 9px 11px; }
+
+.field-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.field-value {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.field-value.good  { color: var(--green); }
+.field-value.muted { color: var(--fg-dim); font-size: 13px; }
+
+#conn-detail { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+
+#model-detail { word-break: break-word; }

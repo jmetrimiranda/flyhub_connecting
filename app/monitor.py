@@ -125,12 +125,20 @@ class Monitor:
         name = item.get("name") or "?"
         received = int(item.get("bytesReceived") or 0)
 
+        ready = bool(item.get("ready"))
+
         prev = self._prev.get(name)
         if prev is None:
             rate_bps = 0.0
             stalled_for = 0.0
             changed_at = now
+            ready_since = now if ready else None
         else:
+            # Zera quando o path deixa de estar pronto: o cronômetro é do stream
+            # atual, não do path como identificador.
+            ready_since = prev["ready_since"] if ready else None
+            if ready and ready_since is None:
+                ready_since = now
             dt = max(now - prev["ts"], 1e-6)
             delta = max(received - prev["bytes"], 0)
             # suaviza o ruído do intervalo de polling
@@ -143,11 +151,13 @@ class Monitor:
             "ts": now,
             "changed_at": changed_at,
             "rate_bps": rate_bps,
+            "ready_since": ready_since,
         }
 
         return {
             "name": name,
-            "ready": bool(item.get("ready")),
+            "ready": ready,
+            "ready_for": round(now - ready_since, 1) if ready_since else None,
             "resolution": _resolution(item),
             "codecs": _codecs(item),
             "bytes_received": received,

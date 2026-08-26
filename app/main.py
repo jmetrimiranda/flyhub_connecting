@@ -1,7 +1,8 @@
-"""Painel de controle do pipeline de drone — fatias 1 e 2.
+"""Painel de controle do pipeline de drone.
 
-Estado do pipeline via SSE e start/stop com exibição do endereço RTMP.
-MJPEG, coleta, split e Roboflow ficam para as fatias seguintes.
+Estado do pipeline via SSE, start/stop com exibição do endereço RTMP e vídeo ao
+vivo em MJPEG com a inferência aplicada. Coleta, split e Roboflow ficam para as
+fatias seguintes.
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from . import pipeline
+from .inference import detector
 from .monitor import monitor
+from .video import BOUNDARY, video
 
 BASE_DIR = Path(__file__).resolve().parent
 SSE_INTERVAL_S = 2.0
@@ -28,7 +31,9 @@ SSE_INTERVAL_S = 2.0
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     monitor.start()
+    video.start()
     yield
+    video.stop()
     monitor.stop()
 
 
@@ -46,6 +51,9 @@ async def _state() -> dict:
     return {
         "pipeline": await run_in_threadpool(pipeline.snapshot),
         "stream": monitor.snapshot(),
+        "video": video.stats(),
+        # poll() pode carregar os pesos — vai para o threadpool junto.
+        "model": await run_in_threadpool(detector.poll),
     }
 
 
@@ -81,7 +89,13 @@ async def pipeline_status():
 def _envelope(result: dict) -> dict:
     """Mesma forma de /events, para o JS ter um só renderizador."""
     ok = result.pop("ok")
-    return {"ok": ok, "pipeline": result, "stream": monitor.snapshot()}
+    return {
+        "ok": ok,
+        "pipeline": result,
+        "stream": monitor.snapshot(),
+        "video": video.stats(),
+        "model": detector.status(),
+    }
 
 
 @app.post("/api/pipeline/start")
@@ -93,3 +107,34 @@ async def pipeline_start(body: StartRequest | None = None):
 @app.post("/api/pipeline/stop")
 async def pipeline_stop():
     return _envelope(await run_in_threadpool(pipeline.stop))
+
+
+@app.get("/stream")
+async def stream():
+    """MJPEG do quadro já inferido.
+
+    Enquanto o gerador vive, ele conta como consumidor: é o que mantém o RTSP
+    aberto. Fechar a aba encerra o gerador e, dez segundos depois sem nenhum
+    outro consumidor, o leitor solta a conexão.
+    """
+    return StreamingResponse(
+        video.mjpeg(),
+        media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
+        headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/stream/stats")
+async def stream_stats():
+    return video.stats()
+
+
+@app.get("/api/model")
+async def model_status():
+    return await run_in_threadpool(detector.poll)
+
+
+@app.post("/api/model/reload")
+async def model_reload():
+    """Recarrega os pesos sem reiniciar o processo."""
+    return await run_in_threadpool(detector.reload)

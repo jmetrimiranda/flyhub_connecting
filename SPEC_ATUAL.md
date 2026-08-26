@@ -15,11 +15,12 @@ Escopo entregue:
   contíguos disparado ao salvar, com `split_manifest.json`;
 - **fatias 4 e 5** — tela de datasets com lista, galeria por partição, exclusão
   de imagens e do dataset, refazer o split; e upload ao Roboflow preservando a
-  partição, com retomada de falha parcial.
+  partição, com retomada de falha parcial;
+- **fatias 6 e 7** — a pasta `train/` com o script de treino, e a tela de modelo
+  com as métricas lidas do `metrics.json` e três exemplos do conjunto de teste.
 
-Fora de escopo, ainda não implementado: a tela de modelo (`/api/model/samples`)
-e a pasta `train/`. A navegação do topo mostra `Modelo` desabilitado, marcado
-`em breve`.
+A especificação está implementada por inteiro. As três telas existem e a
+navegação do topo não tem mais nenhuma entrada desabilitada.
 
 Arquivos:
 
@@ -34,20 +35,26 @@ Arquivos:
 | `app/split.py` | split temporal por blocos contíguos e `split_manifest.json` |
 | `app/datasets.py` | versionamento, layout em disco, leitura, divergência, exclusão e miniaturas |
 | `app/roboflow_upload.py` | envio ao Roboflow em thread, com retomada e cancelamento |
+| `app/metrics.py` | leitura do `metrics.json` e conferência do sha256 dos pesos |
+| `app/samples.py` | três exemplos do teste, com cache em disco e geração em thread |
 | `app/templates/index.html` | tela Home |
 | `app/templates/datasets.html`, `app/templates/dataset.html` | lista e detalhe dos datasets |
+| `app/templates/model.html` | tela de modelo |
 | `app/templates/_nav.html` | navegação, incluída pelas três telas |
 | `app/static/app.js` | comportamento da Home |
-| `app/static/datasets.js`, `app/static/dataset.js` | lista e detalhe |
+| `app/static/datasets.js`, `app/static/dataset.js` | lista e detalhe dos datasets |
+| `app/static/model.js` | tela de modelo |
 | `app/static/app.css` | tema, compartilhado pelas telas |
 | `run.sh` | sobe o uvicorn |
 | `tools/fake_stream.sh` | publica um `testsrc` no MediaMTX, para trabalhar sem drone |
+| `train/train.py` | treino YOLO, cópia dos pesos e geração do `metrics.json` |
+| `train/README.md` | o ciclo completo, do download no Roboflow aos pesos em produção |
 
 ---
 
 ## 1. Rotas
 
-Trinta e uma rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
+Trinta e seis rotas de aplicação, mais os estáticos em `/static/*` (`StaticFiles`).
 
 | Método | Caminho | Corpo da requisição | Resposta |
 |---|---|---|---|
@@ -82,6 +89,11 @@ Trinta e uma rotas de aplicação, mais os estáticos em `/static/*` (`StaticFil
 | POST | `/api/roboflow/upload` | `{version, workspace, project, api_key?, batch_name?, tags?}` | `200 application/json` — `{ok, upload}` |
 | POST | `/api/roboflow/cancel` | — | `200 application/json` — `{ok, upload}` |
 | GET | `/api/roboflow/status` | — | `200 application/json` — estado, progresso e `config` |
+| GET | `/model` | — | HTML da tela de modelo |
+| GET | `/api/model/metrics` | — | `200 application/json` — o `metrics.json` e a conferência do sha256 (ver §11) |
+| GET | `/api/model/samples` | — | `200 application/json` — estado do cache dos exemplos; **nunca gera** |
+| POST | `/api/model/samples/generate` | — | `200 application/json` — dispara a geração em thread e responde na hora |
+| GET | `/api/model/samples/image/{index}` | — | `200 image/jpeg` — o exemplo `0`, `1` ou `2`; `404` se não foi gerado |
 
 `GET /events` responde apenas a GET — qualquer outro método devolve `405` com
 header `allow: GET`.
@@ -135,7 +147,7 @@ Campos de `pipeline` (montados por `pipeline.snapshot()`):
 |---|---|---|
 | `busy` | bool | há um start/stop em execução neste instante |
 | `error` | string \| null | mensagem do último start/stop que falhou; zerada no início de cada start/stop |
-| `steps` | lista | relatório do último start/stop (ver §11). `[]` antes do primeiro |
+| `steps` | lista | relatório do último start/stop (ver §13). `[]` antes do primeiro |
 | `stream_path` | string | path **efetivo**: o nome real do path ativo no MediaMTX quando houver um; senão o configurado |
 | `configured_path` | string | o que `STREAM_PATH` ou o último start definiu |
 | `path_detected` | bool | `true` quando os dois divergem — o painel está exibindo um path que não foi ele quem escolheu |
@@ -153,7 +165,7 @@ verificações — continuam preenchidas com tudo parado.
 Os três URLs usam o path **efetivo**, não o configurado: com um path publicando
 sob outro nome, é o nome real que aparece. O sufixo do path é a única credencial
 do endpoint RTMP, e exibir o sufixo errado é exibir um endereço que não funciona.
-Ver §13.
+Ver §15.
 
 ### POST /api/pipeline/start
 
@@ -405,7 +417,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 | `resolution` | primeiro `tracks2[]` que tenha `codecProps.width` e `.height`, formatado `W×H` (separador é `×`, U+00D7); `null` se nenhum tiver |
 | `codecs` | `tracks2[].codec`; se `tracks2` estiver vazio, cai para `tracks[]` (MediaMTX antigo, sem dimensões) |
 | `bytes_received` | `bytesReceived` |
-| `mbps` | derivada calculada localmente (ver §10) |
+| `mbps` | derivada calculada localmente (ver §12) |
 | `stalled_for` | segundos desde a última variação de `bytesReceived` |
 | `readers` | `len(readers)` |
 | `source` | `source.type` (ex.: `"rtmpConn"`) |
@@ -443,7 +455,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
 Note que `steps` continua mostrando `ok` nos quatro passos: é o relatório do
 último start, um registro histórico, não o estado atual. Quem informa o estado
 atual é `mediamtx.running` e `api_ok`. Note também que `rtmp_url` segue
-preenchido — ver §14.
+preenchido — ver §16.
 
 O texto entre parênteses em `stream.error` é o nome da classe da exceção httpx
 (`ConnectError`, `ReadTimeout`, `ConnectTimeout`…).
@@ -474,10 +486,8 @@ perdidos (não usamos `id:`/`Last-Event-ID`).
 ### Navegação (topo, acima da barra de estado)
 
 Uma faixa com a marca `M4TD` e três entradas: **Home**, **Datasets** e
-**Modelo**. As duas primeiras são links, e a atual fica sublinhada em azul.
-**Modelo** ainda não é link — é um `<span>` a 50% de opacidade com o selo
-`em breve`, porque a tela não existe e um link que devolve 404 é pior que uma aba
-apagada.
+**Modelo**. As três são links, e a atual fica sublinhada em azul. Não há mais
+nenhuma entrada desabilitada.
 
 A faixa vive em `app/templates/_nav.html` e é incluída pelas três telas, com a
 variável `current` vinda do handler de cada rota. A barra de estado do voo (os
@@ -491,7 +501,7 @@ clicável.** A cor nunca aparece sozinha — sempre acompanhada de texto.
 
 | Cartão | Rótulo fixo | Valor exibido | Cor da bolinha |
 |---|---|---|---|
-| Disponibilidade | `Disponibilidade` | `stream.label` (ver §10). Antes do primeiro frame: `conectando…` | `stream.level` |
+| Disponibilidade | `Disponibilidade` | `stream.label` (ver §12). Antes do primeiro frame: `conectando…` | `stream.level` |
 | MediaMTX | `MediaMTX` | `Parado` / `No ar` / `Container no ar, API muda` | vermelho se container parado; verde se container no ar **e** `api_ok`; amarelo se container no ar e API não responde |
 | Túnel | `Túnel` | `Parado` / o endereço (`bore.pub:49934`) / `Subindo…` | vermelho se sem processo; verde se processo e endereço; amarelo se processo sem endereço ainda |
 | Stream | `Stream` | nomes dos paths separados por `, ` — ou `Nenhum path ativo` | igual a `stream.level` |
@@ -792,6 +802,33 @@ quando não há chave configurada**; havendo, o lugar dele traz "Chave lida de
 lugar a uma barra de progresso, à linha de contagem (`137 de 205 enviadas · 2
 falharam · train/000138_t68.51.jpg · ~30 s restantes`) e ao botão de cancelar.
 
+### Tela 3 — modelo (`/model`)
+
+Duas colunas, somente leitura.
+
+**Desempenho.** Quatro cartões grandes — mAP@50, mAP@50-95, Precision, Recall —
+cada um com o valor em porcentagem e uma linha explicando o que a métrica quer
+dizer (`das detecções, quantas estavam certas`, `dos objetos, quantos foram
+encontrados`). Abaixo, a tabela por classe. Acima, uma faixa quando o
+`metrics.json` não descreve o `best.pt` carregado (§11) — vermelha em
+`divergente`, amarela em `sem_pesos` e `desconhecido`.
+
+**Exemplos do conjunto de teste.** Grade de três, com o nome do arquivo de
+origem, a contagem por classe (`5 detecções · 1× bus, 4× person`, ou
+`nenhuma detecção` em cinza) e as etiquetas `classe confiança`. Clicar abre em
+tamanho real. Enquanto a geração roda, o lugar da grade traz o progresso e o
+aviso de que a primeira geração carrega o modelo e pode demorar.
+
+**Coluna da direita:** `Pesos carregados` — mesmo vocabulário de estado do badge
+da Home (`MODELO ATIVO`, `SEM MODELO`, `MODELO NÃO CARREGOU`) e o botão
+`Recarregar pesos` —, `Treino` com os hiperparâmetros e a pasta do run,
+`Dataset de origem` com as contagens e o aviso de partição divergente, e
+`Como treinar` com o comando pronto para copiar.
+
+O estado vazio principal — sem pesos e sem métricas, que é o estado inicial do
+projeto — ocupa o lugar do painel de desempenho e traz um botão para a tela de
+Datasets.
+
 ### Tema
 
 Escuro fixo (`#0d1117` de fundo), sem alternador. Layout em duas colunas
@@ -848,8 +885,39 @@ Sem nenhum consumidor por `IDLE_CLOSE_S = 10.0` s, o leitor libera o
 ### Reconexão
 
 Backoff exponencial começando em `RECONNECT_MIN_S = 1.0` s e dobrando até o teto
-de `RECONNECT_MAX_S = 10.0` s, zerado a cada conexão bem-sucedida. Durante a
-espera, `retry_in_s` traz os segundos que faltam.
+de `RECONNECT_MAX_S = 10.0` s. Durante a espera, `retry_in_s` traz os segundos
+que faltam.
+
+**O backoff é zerado por um quadro lido, não por uma conexão aberta.** A
+distinção não é sutil: um path que **abre e nunca entrega quadro** — publicador
+que caiu sem o MediaMTX derrubar o path — reiniciava o backoff a cada ciclo,
+porque `backoff = RECONNECT_MIN_S` vinha logo depois do `isOpened()`. O
+resultado era uma abertura de RTSP por segundo, para sempre, cada uma custando
+um FFmpeg inteiro. Reproduzido com um `VideoCapture` falso que abre e falha na
+leitura: **30 tentativas em 30 segundos, todas a 1,0 s**. Com o `backoff` zerado
+só depois de `cap.read()` devolver imagem, as mesmas condições dão **6
+tentativas**, com intervalos `1, 2, 4, 8, 10`.
+
+**O leitor não tenta abrir quando o monitor sabe que não há path.** Antes de
+construir o `VideoCapture`, `_path_ready()` consulta o snapshot do monitor:
+
+| Resposta | Significado | O que o leitor faz |
+|---|---|---|
+| `False` | a API respondeu e não há path com `ready` | não abre nada; espera `NO_PATH_POLL_S = 1.0` s relendo memória |
+| `True` | há path publicando | abre |
+| `None` | a API do MediaMTX não respondeu | abre, com backoff — API inalcançável **não** prova que não há path, e o servidor RTSP pode estar servindo normalmente |
+
+Nesse estado o campo `error` fica `nenhum path publicando no MediaMTX` e
+`retry_in_s` fica `null` — não há tentativa agendada. Medido com a API no ar e
+sem publicador: **zero aberturas de RTSP** e 0,8–1,0% de CPU, que é a linha de
+base do SSE e do polling do monitor.
+
+O efeito colateral é uma recuperação mais rápida: como a espera nesse estado é
+de 1 s e não do backoff acumulado, a captura começa quase imediatamente quando
+o drone volta a publicar. Medido, com o path aparecendo depois de 4 s de
+ociosidade: primeira tentativa **0 ms** depois. Ponta a ponta, do `ffmpeg`
+subindo até quadros chegando: 6,6 s, a maior parte disso sendo o encoder e o
+intervalo de 2 s do polling do monitor.
 
 O gerador MJPEG **não** encerra quando não há sinal: emite um quadro sintético
 (640×360, fundo `#121212`) com o título `Aguardando stream` e o motivo em até
@@ -932,7 +1000,7 @@ Capturado com um cliente MJPEG aberto e o `testsrc` publicando:
 | Campo | Como é medido |
 |---|---|
 | `connected` | há um `VideoCapture` aberto e entregando |
-| `source` | URL RTSP em uso, montada com o path efetivo (§13) |
+| `source` | URL RTSP em uso, montada com o path efetivo (§15) |
 | `error` | motivo da última desconexão; `null` quando conectado |
 | `reconnects` | quedas depois de uma conexão que já tinha funcionado |
 | `retry_in_s` | segundos até a próxima tentativa; `null` fora da espera |
@@ -1978,7 +2046,7 @@ Ordem de resolução, medida:
 
 A leitura do `.env` é de **uma linha só**: o painel deliberadamente não chama
 `load_dotenv()`, porque carregar o arquivo inteiro mudaria o valor de outras
-variáveis já lidas na importação dos módulos (§12). `_key_from_dotenv()` procura
+variáveis já lidas na importação dos módulos (§14). `_key_from_dotenv()` procura
 a chave, ignora comentários e tira aspas.
 
 `GET /api/roboflow/config` informa se há SDK e se há chave — nunca a chave, nem
@@ -2121,7 +2189,326 @@ divergência começa a ser visível antes de o operador clicar em excluir.
 
 ---
 
-## 10. Semáforo
+## 10. Treino — `train/`
+
+Nada aqui roda dentro da aplicação. O painel só **lê** o que estes scripts
+produzem: `data/models/best.pt` e `data/models/metrics.json`.
+
+| Arquivo | Papel |
+|---|---|
+| `train/train.py` | treina, copia os pesos e gera o `metrics.json` |
+| `train/data.yaml.example` | formato esperado, com a árvore de pastas |
+| `train/requirements.txt` | só `ultralytics>=8.3.0` |
+| `train/README.md` | o ciclo completo: baixar, treinar, onde os pesos param, como a aplicação os detecta |
+
+### Dependências separadas
+
+`train/requirements.txt` é separado do principal de propósito: `ultralytics`
+arrasta torch e torchvision, ~2,5 GB. A aplicação não precisa de nada disso —
+sem pesos ela roda em passthrough, e com pesos o `Detector` importa
+`ultralytics` preguiçosamente (§5). Quem só opera o painel não instala 2,5 GB.
+
+Verificado bloqueando o import de `ultralytics`, `torch` e `torchvision`: a
+aplicação importa, o detector cai em passthrough com a mensagem
+`ultralytics indisponível (ImportError: …)`, a geração de exemplos falha
+registrando o erro, e a tela de Modelo continua respondendo.
+
+### `train.py`
+
+```
+python3 train/train.py --data datasets/v1/data.yaml --epochs 100
+```
+
+| Argumento | Padrão |
+|---|---|
+| `--data` | *obrigatório* — caminho do `data.yaml` |
+| `--model` | `yolo11n.pt` |
+| `--epochs` | `100` |
+| `--imgsz` | `640` |
+| `--batch` | `16` |
+| `--name` | `m4td-<AAAAMMDD-HHMMSS>` |
+| `--device` | automático |
+| `--manifest` | o `split_manifest.json` da versão mais recente |
+| `--skip-split-check` | não confere a partição |
+| `--strict-split` | aborta se a partição divergir |
+| `--dry-run` | só confere a partição e sai |
+
+Sequência: confere a partição → treina → valida → copia `best.pt` para
+`data/models/` → escreve `data/models/metrics.json` → imprime onde tudo foi
+parar.
+
+Códigos de saída: `0` tudo certo, `1` `--dry-run` com partição divergente, `2`
+`data.yaml` ausente ou ultralytics não instalado, `3` abortado por
+`--strict-split`, `4` o treino não produziu `best.pt`.
+
+### A conferência de partição
+
+**O ponto em que todo o cuidado da coleta pode ser perdido em um clique.**
+
+O Roboflow reparticiona ao gerar uma versão — o passo *Train/Test Split* sugere
+rebalancear para algo como 70/20/10. Aceitar isso redistribui as imagens
+**aleatoriamente**: o `data.yaml` baixado vem com a partição dele, quadros
+vizinhos no tempo voltam a cair em partições diferentes, e o vazamento que o
+split temporal evitou (§7) volta pela porta dos fundos. O treino roda
+normalmente e reporta métricas melhores que a realidade.
+
+Antes de treinar, o script conta as imagens de cada pasta apontada pelo
+`data.yaml` e compara com as contagens do `split_manifest.json` local. Saída
+real, com um dataset rebalanceado para 70/20/10:
+
+```
+--- partição do dataset ---
+                    baixado      split temporal v0.3
+train         686   (70.0%)           695    (70.9%)
+valid         196   (20.0%)           140    (14.3%)
+test           98   (10.0%)           145    (14.8%)
+
+  ATENÇÃO
+    - valid: o dataset baixado tem 20.0% das imagens e o split temporal de
+      v0.3 tem 14.3% — a partição não é a mesma
+
+  O Roboflow reparticiona ao gerar uma versão. Se a versão foi gerada
+  com rebalanceamento, quadros vizinhos no tempo voltaram a cair em
+  partições diferentes: o modelo memoriza, a métrica de validação sobe
+  e não se sustenta em voo novo. …
+```
+
+Dispara acima de `PROPORTION_TOLERANCE_PP = 5.0` pontos percentuais de desvio,
+e também quando o `data.yaml` não aponta para nenhuma imagem de teste. Por
+padrão **avisa e continua** — é o operador quem decide; `--strict-split` aborta.
+
+Aumento de dados do Roboflow não é confundido com rebalanceamento: ele
+multiplica imagens dentro de cada partição, então a proporção se mantém e só a
+contagem total sobe, o que vira um aviso separado e mais brando.
+
+O resultado entra no `metrics.json` em `dataset.split_check_ok` e
+`dataset.split_warnings`. Meses depois dá para saber se aquelas métricas vieram
+de um dataset com a partição preservada — e a tela de Modelo mostra isso (§11).
+
+### O parser de `data.yaml`
+
+Usa PyYAML quando disponível (vem com o ultralytics) e cai num parser mínimo
+quando não — suficiente para `path`, `train`, `val`, `test`, `nc` e uma lista
+`names`. Assim `--dry-run` confere a partição numa máquina que ainda não tem o
+ambiente de treino montado.
+
+`train:`/`val:`/`test:` são resolvidos contra `path:`, e um caminho que aponte
+para a pasta da partição em vez de `images/` é corrigido — alguns exports do
+Roboflow fazem isso.
+
+### `metrics.json`
+
+Escrito por `tmp` + `replace`. É o único arquivo que a tela de Modelo lê.
+
+```json
+{
+  "generated_at": 1787751234.5,
+  "generated_at_iso": "2026-08-26T18:13:54-0300",
+  "source": "train/train.py",
+  "weights": {"path": "data/models/best.pt", "sha256": "0ebbc80d…", "size_bytes": 5613764,
+              "from_run": "/…/runs/detect/m4td-20260826-181200/weights/best.pt"},
+  "training": {"base_model": "yolo11n.pt", "epochs": 100, "imgsz": 640, "batch": 16,
+               "name": "m4td-20260826-181200", "run_dir": "/…/runs/detect/…", "device": null},
+  "dataset": {"data_yaml": "/…/datasets/v1/data.yaml", "name": "v1",
+              "counts": {"train": 695, "valid": 140, "test": 145},
+              "proportions": {"train": 70.9, "valid": 14.3, "test": 14.8},
+              "split_manifest_version": "v0.3", "split_check_ok": true, "split_warnings": []},
+  "metrics": {"map50": 0.81235, "map50_95": 0.54123, "precision": 0.7788,
+              "recall": 0.7011, "fitness": 0.5723},
+  "per_class": [
+    {"class_id": 0, "name": "drone", "map50": 0.86, "map50_95": 0.58,
+     "precision": 0.81, "recall": 0.73}
+  ],
+  "classes": ["drone", "pessoa"]
+}
+```
+
+**O sha256 dos pesos não é decoração.** O `metrics.json` descreve um treino, não
+o arquivo que está carregado agora, e os dois divergem assim que alguém copia um
+`best.pt` à mão por cima. O hash é o que permite à tela de Modelo dizer isso em
+vez de exibir métricas de outro modelo como se fossem do atual — a mesma
+disciplina do manifesto em relação às pastas do dataset (§8).
+
+### Extração das métricas
+
+`extract_metrics()` lê o objeto de validação do Ultralytics e é tolerante de
+propósito: a forma de `results.box` mudou entre versões, e um atributo ausente
+vira `null` no JSON em vez de derrubar o treino depois de horas de GPU. `NaN`
+também vira `null`.
+
+Uma armadilha tratada: `box.maps` é indexado por **id de classe**, enquanto
+`box.ap50`, `box.p` e `box.r` são indexados pela **posição em
+`box.ap_class_index`**. Misturar os dois atribui a métrica da classe errada
+quando o conjunto de teste não tem instâncias de todas as classes. Verificado
+contra um objeto de validação falso com as classes 0 e 2 presentes e a 1
+ausente: `map50_95` da classe 2 sai de `maps[2]`, não de `maps[1]`.
+
+Como não há GPU nem torch na máquina de desenvolvimento, o que foi exercitado
+foi a conferência de partição (com datasets sintéticos) e a extração de
+métricas (com um objeto falso no formato do Ultralytics). O laço de treino em si
+é uma chamada a `model.train()`.
+
+---
+
+## 11. Tela de modelo — `app/metrics.py` e `app/samples.py`
+
+Somente leitura. Mostra o desempenho do modelo carregado e três exemplos do
+conjunto de teste com as predições desenhadas.
+
+### As métricas nunca são calculadas aqui
+
+`app/metrics.py` lê `data/models/metrics.json` e nada mais. Calcular mAP no
+painel exigiria torch, o conjunto de validação em disco e minutos de CPU — e
+daria um número diferente do que o treino reportou, o que é pior que não dar
+número nenhum.
+
+`read()` nunca levanta: os estados vazios são dados, não exceções.
+
+| `match` | Quando | O que a tela mostra |
+|---|---|---|
+| `sem_metricas` | não há `metrics.json` | as métricas explicam que quem as gera é `train/train.py`; os exemplos continuam funcionando |
+| `erro` | o arquivo existe e não é JSON válido | a mensagem do erro |
+| `sem_pesos` | há métricas, não há `best.pt` | "as métricas são de um treino anterior; não há arquivo de pesos carregado para conferir" |
+| `desconhecido` | o documento não registra `sha256` | "não dá para confirmar que descreve o best.pt carregado" |
+| `divergente` | o `sha256` registrado ≠ o do `best.pt` | caixa vermelha: "estas métricas são de outro treino…" |
+| `confere` | os dois batem | nada — é o caso normal |
+
+Medido com um `best.pt` real e um `metrics.json` de sha errado:
+
+```
+match  = divergente
+reason = estas métricas são de outro treino: o sha256 registrado não é o do
+         best.pt carregado. Alguém copiou pesos por cima, ou o treino não
+         terminou de atualizar o metrics.json.
+registrado = aaaaaaaaaaaaaaaa…  atual = 0ebbc80d4a7680d1…
+```
+
+O sha256 do arquivo carregado é cacheado por `(caminho, mtime, tamanho)`:
+hashear 6 MB a cada carga de tela seria desperdício, e o arquivo só muda quando
+o treino copia um novo.
+
+### Os três exemplos
+
+`GET /api/model/samples` **nunca computa**. Devolve o cache e um estado.
+`POST /api/model/samples/generate` dispara uma thread e responde na hora.
+
+O motivo é medido: inferir em três imagens custa 50–300 ms cada, mas a
+**primeira** chamada importa o torch e carrega os pesos, o que leva de 5 a 20 s.
+Uma rota que inferisse na hora deixaria a requisição pendurada, e um F5
+repetiria tudo. Execução real:
+
+```
+POST /api/model/samples/generate  respondeu em 289 ms
+geração concluída em 3,0 s, em segundo plano
+```
+
+Os 3,0 s são com os pesos **já carregados** — o vídeo ao vivo estava rodando e o
+`Detector` é o mesmo objeto. Sem vídeo aberto, a primeira geração paga o
+carregamento.
+
+**Cache.** `data/models/samples/` com `0.jpg`, `1.jpg`, `2.jpg` e um
+`samples.json` que guarda a chave. A chave é
+`(caminho, mtime e tamanho dos pesos, versão do dataset, os três nomes de
+arquivo)`. Qualquer mudança vence o cache: retreinou e copiou um `best.pt` novo,
+o mtime muda; excluiu imagens do teste, os nomes escolhidos mudam. É o mesmo
+mecanismo de mtime que o `Detector` usa para recarregar pesos (§5).
+
+Verificado: com o cache em `pronto`, três imagens novas foram acrescentadas ao
+`test/` e o estado passou sozinho para `ausente`, com uma escolha de arquivos
+diferente.
+
+Um arquivo do cache apagado à mão também invalida o conjunto: `status()` confere
+que os três existem antes de dizer `pronto`.
+
+**Quais três.** `pick()` devolve a primeira, a do meio e a última de
+`test/images/` na ordem temporal. Determinístico, não sorteado: três aleatórias
+mudariam a cada geração e impediriam comparar visualmente um modelo com o
+anterior, e três vizinhas seriam quase idênticas — pelo mesmo motivo que o split
+é temporal. Com três ou menos imagens no teste, devolve todas.
+
+```
+241 arquivos → ['000001.jpg', '000121.jpg', '000241.jpg']
+```
+
+**Prioridade.** A thread chama `os.nice(10)`, como os workers de escrita da
+coleta (§6): se alguém abrir esta tela no meio de um voo, quem cede CPU é a
+tela, não o vídeo.
+
+**Desenho.** Usa `detector.detect()` e `detector.draw()` — os mesmos do vídeo ao
+vivo. As caixas saem idênticas às que o operador viu no voo, e não há um segundo
+código de desenho para divergir. A imagem é reduzida a 960 px de largura e
+gravada com qualidade 85; o arquivo de treino continua intacto em `test/images/`.
+
+Uma geração por vez em todo o processo; a segunda chamada é recusada com
+`já há uma geração em andamento`.
+
+### Estados de `GET /api/model/samples`
+
+| `state` | Quando |
+|---|---|
+| `pronto` | o cache bate com a chave atual e os três arquivos existem |
+| `gerando` | há uma thread em execução; `progress` traz `done`, `total`, `current` |
+| `ausente` | dá para gerar, mas o cache não existe ou venceu |
+| `indisponível` | não dá para gerar — sem pesos, ou sem dataset com partição de teste |
+
+`indisponível` traz o motivo por extenso, um para cada causa:
+
+```
+nenhum modelo carregado — coloque os pesos em /…/data/models/best.pt para gerar exemplos
+nenhum dataset com partição de teste — colete um voo e salve, ou refaça o split
+de uma versão existente
+```
+
+Com `state: "ausente"`, o cliente dispara o `generate` **uma vez** sozinho e
+passa a consultar o status a cada segundo — mesmo padrão do upload (§9).
+
+Saída real de uma geração, com o modelo COCO de referência sobre um dataset em
+que ele não tem o que detectar, mais uma imagem com objetos:
+
+```
+[0] 000073_t42.92.jpg -> 0 detecções {}
+[1] 000077_t44.95.jpg -> 0 detecções {}
+[2] 000902_t902.00.jpg -> 5 detecções {'bus': 1, 'person': 4}
+     bus 0.94 caixa=[3, 229, 796, 728]
+     person 0.888 caixa=[671, 394, 809, 878]
+```
+
+Zero detecções é um resultado, não um erro: a legenda diz `nenhuma detecção` em
+cinza, e a imagem aparece do mesmo jeito.
+
+### A tela
+
+Duas colunas. À esquerda, o painel de desempenho — quatro cartões grandes com
+mAP@50, mAP@50-95, precision e recall, cada um com uma linha explicando o que é
+— a tabela por classe, e a grade dos três exemplos. Cada exemplo traz o nome do
+arquivo de origem, a contagem de detecções por classe e as etiquetas
+`classe confiança`; clicar abre em tamanho real.
+
+À direita: `Pesos carregados` (com o mesmo vocabulário de estado do badge da
+Home — `MODELO ATIVO`, `SEM MODELO`, `MODELO NÃO CARREGOU` — e o botão
+`Recarregar pesos`), `Treino` (hiperparâmetros e a pasta do run), `Dataset de
+origem` e um painel `Como treinar` com o comando pronto.
+
+Quando `dataset.split_check_ok` é `false`, o painel do dataset mostra em amarelo
+que a partição usada no treino divergiu do split temporal e que as métricas
+podem estar otimistas.
+
+### Estados vazios
+
+Nenhum quebra a tela. Verificados um a um:
+
+| Situação | O que aparece |
+|---|---|
+| sem pesos e sem métricas | estado vazio: onde largar o `best.pt`, e um botão para a tela de Datasets sugerindo coletar e treinar |
+| métricas sem pesos | as métricas aparecem, com o aviso de que são de um treino anterior |
+| pesos sem métricas | os cartões dão lugar a um texto dizendo que quem gera o arquivo é `train/train.py`; **os exemplos continuam funcionando**, porque só dependem do modelo |
+| pesos e métricas, sem dataset de teste | os exemplos ficam `indisponível` com o motivo; as métricas aparecem normalmente |
+| `metrics.json` ilegível | a mensagem do erro, sem derrubar o resto |
+| sem torch instalado | o badge fica vermelho, a geração falha registrando o erro, e o resto da tela responde |
+
+---
+
+## 12. Semáforo
 
 Calculado em `Monitor._traffic_light` (`app/monitor.py`), avaliado a cada ciclo
 de polling (2 s). Constante única: `STALE_AFTER_S = 10.0`.
@@ -2198,7 +2585,7 @@ enquanto ainda chegam bytes.
 
 ---
 
-## 11. Passos do start
+## 13. Passos do start
 
 Quatro passos, nesta ordem, com estes nomes exatos no relatório:
 
@@ -2260,7 +2647,7 @@ sobrescreva a mensagem da colisão. A coleta segue a mesma convenção (§6).
 
 ---
 
-## 12. Variáveis de ambiente
+## 14. Variáveis de ambiente
 
 Nenhuma é obrigatória. Todas são lidas **na importação do módulo** — mudar depois
 exige reiniciar o painel. O `.env` do repositório **não** é carregado pelo painel
@@ -2309,9 +2696,16 @@ Dos datasets e do Roboflow: `THUMB_WIDTH = 240`, `THUMB_QUALITY = 72`,
 `THUMBS_DIR = ".thumbs"`, `MAX_CONSECUTIVE_FAILURES = 10`, `FLUSH_EVERY = 5` e
 `DEFAULT_TAGS = ("drone",)`.
 
+Do vídeo e da tela de modelo: `NO_PATH_POLL_S = 1.0`, `SAMPLE_COUNT = 3`,
+`MAX_WIDTH = 960` e `WORKER_NICE = 10` para os exemplos, e
+`PROPORTION_TOLERANCE_PP = 5.0` na conferência de partição do `train.py`.
+Os caminhos `data/models/best.pt`, `data/models/metrics.json` e
+`data/models/samples/` são fixos, exceto o dos pesos, que sai de
+`MODEL_WEIGHTS`.
+
 ---
 
-## 13. Reconciliação
+## 15. Reconciliação
 
 O painel **não guarda** o estado do pipeline em memória entre requisições. Toda
 resposta de `snapshot()` é medida no sistema no momento da chamada, o que
@@ -2359,7 +2753,7 @@ sistema, e não há de onde recuperá-la.
 
 ---
 
-## 14. Limitações conhecidas
+## 16. Limitações conhecidas
 
 **Endereço RTMP continua visível com o MediaMTX parado.** `rtmp_url` depende
 apenas do túnel: com `bore` vivo e container morto, o campo segue verde e o botão
@@ -2535,10 +2929,51 @@ limpo por um resplit ou pela exclusão do dataset.
 todas as versões e `live_counts()` faz um `scandir` por partição. Com dezenas de
 datasets grandes a tela começa a demorar; não há cache nem índice.
 
-**Não implementado nestas fatias:** `/api/model/samples`, a tela de modelo, a
-pasta `train/`, o formulário de configurações do item 3 da especificação
+**A inferência real derruba o FPS de inferência, como esperado.** Medido com
+`yolo11n` em CPU sobre um stream 960×720 a 30 fps: captura 30,0 fps, inferência
+**3,0 fps**, latência 377 ms. O slot de um quadro (§4) faz exatamente o que
+existe para fazer — a captura não acumula e a latência fica limitada a um
+período de inferência —, mas o vídeo exibido passa a ser de 3 fps. Numa máquina
+sem GPU isso é o teto; o painel mostra os dois números lado a lado justamente
+para que a causa fique visível.
+
+**A tela de modelo não escolhe o dataset.** Os exemplos saem sempre da versão
+mais recente que tenha `test/images/` não vazio. Não há como pedir os exemplos
+de uma versão anterior para comparar.
+
+**Os exemplos não são regerados quando o dataset muda de conteúdo sem mudar de
+nome.** A chave do cache cobre os nomes dos arquivos escolhidos, não o conteúdo
+deles. Na prática as imagens são imutáveis depois de gravadas — o que muda a
+lista é exclusão ou resplit, e ambos mudam a chave —, mas sobrescrever um
+arquivo em `test/images/` mantendo o nome deixaria o exemplo velho em cache.
+
+**Só três exemplos, sempre os mesmos.** É a decisão de projeto (§11): primeira,
+meio e última, para que dê para comparar visualmente entre versões do modelo.
+Quem quiser inspecionar outros quadros usa a galeria da tela de Datasets — mas
+lá as imagens são as originais, sem predições desenhadas.
+
+**A geração de exemplos não sobrevive ao reinício.** Como o upload (§9), o
+estado do `SampleService` é memória. Reiniciar o painel no meio de uma geração
+deixa o cache sem gravar; a tela volta em `ausente` e dispara outra.
+
+**O `metrics.json` é confiado como veio.** Nenhum campo é validado além do
+`sha256`: um arquivo escrito à mão com `map50: 0.99` é exibido como verdade. A
+tela é uma janela para o artefato do treino, não uma auditoria dele.
+
+**`train/train.py` não foi exercitado de ponta a ponta.** Não há GPU nem
+conjunto anotado na máquina de desenvolvimento. O que foi testado foi a
+conferência de partição, com datasets sintéticos, e a extração de métricas,
+contra um objeto de validação falso no formato do Ultralytics. O laço de treino
+é uma chamada a `model.train()` e depende do ambiente de quem treina.
+
+**A conferência de partição compara com a versão mais recente.** Se o dataset
+baixado do Roboflow vier de uma versão antiga, a comparação é contra o
+manifesto errado e os avisos ficam sem sentido. `--manifest` aponta o certo, mas
+é preciso lembrar de usá-lo.
+
+**Não implementado:** o formulário de configurações do item 3 da especificação
 original (path com gerador aleatório, transporte RTSP, HLS, resolução, FPS,
 qualidade JPEG) e a geração dinâmica do `mediamtx.yml` — o arquivo
-`config/mediamtx.yml` é usado como está. As proporções do split e a margem
-continuam constantes em `app/split.py`: `POST /resplit` expõe `margin`, mas
-`ratios` só existe na assinatura de `split.run()`.
+`config/mediamtx.yml` é usado como está. As proporções do split continuam
+constantes em `app/split.py`: `POST /resplit` expõe `margin`, mas `ratios` só
+existe na assinatura de `split.run()`.

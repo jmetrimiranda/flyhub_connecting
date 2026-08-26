@@ -1,0 +1,28 @@
+# Exemplo do data.yaml esperado por train/train.py.
+#
+# O download do Roboflow já gera um arquivo assim na raiz da pasta baixada —
+# normalmente não é preciso escrever este à mão. Ele está aqui para que se saiba
+# o que o script lê, e para montar um dataset local sem passar pelo Roboflow.
+#
+# `path` é a raiz; `train`, `val` e `test` são relativos a ela. O Ultralytics
+# procura os rótulos trocando `/images/` por `/labels/` no caminho, então a
+# árvore precisa ser:
+#
+#   dataset/
+#   ├── data.yaml
+#   ├── train/{images,labels}/
+#   ├── valid/{images,labels}/
+#   └── test/{images,labels}/
+#
+# ATENÇÃO: `val` aqui aponta para a pasta `valid/`. É a partição que o
+# split temporal chamou de valid — mantenha o mesmo conteúdo. Ver README.md.
+
+path: /caminho/absoluto/para/o/dataset
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 2
+names:
+  - drone
+  - pessoa

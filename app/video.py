@@ -32,6 +32,7 @@ import numpy as np
 
 from . import pipeline
 from .inference import Detection, detector
+from .monitor import monitor
 
 # rtsp_transport=tcp evita perda de pacotes em UDP; stimeout impede que um
 # servidor morto deixe o VideoCapture pendurado indefinidamente na abertura.
@@ -43,6 +44,8 @@ JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "80"))
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 10.0          # teto do backoff exponencial
 IDLE_CLOSE_S = 10.0             # sem consumidor por esse tempo => fecha o RTSP
+NO_PATH_POLL_S = 1.0            # com o monitor dizendo que não há path, só relê memória
+NO_PATH_MESSAGE = "nenhum path publicando no MediaMTX"
 RESOLUTION_WARNING_S = 300.0    # o aviso de troca de resolução some sozinho
 RATE_WINDOW_S = 3.0
 
@@ -267,10 +270,23 @@ class VideoService:
     def _rtsp_url(self) -> str:
         return pipeline.rtsp_url()
 
+    def _path_ready(self) -> bool | None:
+        """O monitor sabe se há path publicando? `None` quando ele não sabe.
+
+        Com a API do MediaMTX fora do ar não dá para concluir que não há path —
+        o servidor RTSP pode estar servindo normalmente. Nesse caso a resposta é
+        `None` e o leitor tenta abrir, com backoff.
+        """
+        snapshot = monitor.snapshot()
+        if not snapshot.get("api_ok"):
+            return None
+        return any(p.get("ready") for p in snapshot.get("paths") or [])
+
     def _reader_loop(self) -> None:
         cap = None
         backoff = RECONNECT_MIN_S
         idle_since: float | None = None
+        waiting_for_path = False
 
         while not self._stop.is_set():
             if self.consumers.total() == 0:
@@ -288,6 +304,21 @@ class VideoService:
             idle_since = None
 
             if cap is None:
+                # Quando o monitor tem certeza de que não há path, abrir o RTSP
+                # gastaria um processo de FFmpeg por tentativa para receber o
+                # mesmo 404. Esperar aqui custa uma leitura de memória, e o
+                # backoff fica reservado para falha de conexão de verdade — o
+                # que também faz a captura começar em menos de um segundo
+                # quando o drone finalmente publica.
+                if self._path_ready() is False:
+                    if not waiting_for_path:
+                        waiting_for_path = True
+                        self._on_disconnect(NO_PATH_MESSAGE)
+                    backoff = RECONNECT_MIN_S
+                    self._stop.wait(NO_PATH_POLL_S)
+                    continue
+                waiting_for_path = False
+
                 url = self._rtsp_url()
                 cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
                 try:
@@ -301,7 +332,11 @@ class VideoService:
                     backoff = self._wait_backoff(backoff)
                     continue
                 self._on_connect(url)
-                backoff = RECONNECT_MIN_S
+                # O backoff NÃO é zerado aqui. Um path que abre e nunca entrega
+                # quadro — publicador que caiu sem o MediaMTX derrubar o path —
+                # reiniciaria o backoff a cada ciclo, e o leitor ficaria abrindo
+                # o RTSP uma vez por segundo para sempre. Só um quadro de
+                # verdade confirma que a conexão serve para alguma coisa.
 
             ok, image = cap.read()
             if not ok or image is None:
@@ -311,6 +346,7 @@ class VideoService:
                 backoff = self._wait_backoff(backoff)
                 continue
 
+            backoff = RECONNECT_MIN_S
             self._publish_raw(image)
 
         if cap is not None:

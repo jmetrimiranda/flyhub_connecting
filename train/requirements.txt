@@ -1,0 +1,10 @@
+# Dependências do treino — SEPARADAS do requirements.txt principal de propósito.
+#
+# `ultralytics` arrasta torch e torchvision, que somam ~2,5 GB. A aplicação não
+# precisa de nada disso: sem pesos ela roda em passthrough, e com pesos o
+# `Detector` importa ultralytics preguiçosamente, dentro da função de carga.
+#
+# Instale só na máquina que treina:
+#     pip install -r train/requirements.txt
+
+ultralytics>=8.3.0

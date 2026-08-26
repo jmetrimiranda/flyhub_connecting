@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modelo — M4TD</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+{% include "_nav.html" %}
+
+<main class="detail">
+  <section id="m-main">
+    <div class="page-head">
+      <h1>Modelo</h1>
+      <span class="page-sub" id="m-sub">carregando…</span>
+    </div>
+
+    <div class="error" id="m-error" hidden></div>
+
+    <section class="panel" id="m-empty" hidden>
+      <div class="empty">
+        <strong id="m-empty-title">—</strong>
+        <p id="m-empty-body">—</p>
+        <div id="m-empty-actions"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="m-metrics" hidden>
+      <h2>Desempenho</h2>
+      <div class="warning compact" id="m-metrics-warning" hidden></div>
+      <div class="metric-row" id="m-headline"></div>
+      <table class="split-table" id="m-perclass-table" hidden>
+        <thead>
+          <tr><th>Classe</th><th>mAP@50</th><th>mAP@50-95</th><th>Precision</th><th>Recall</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="hint" id="m-perclass-empty" hidden>
+        O arquivo de métricas não traz o detalhamento por classe.
+      </div>
+    </section>
+
+    <section class="panel" id="m-samples" hidden>
+      <h2>Exemplos do conjunto de teste</h2>
+      <div class="hint" id="m-samples-state">—</div>
+      <div class="warning compact" id="m-samples-warning" hidden></div>
+      <div class="samples" id="m-samples-grid"></div>
+      <div class="btn-row" id="m-samples-actions" hidden>
+        <button id="btn-generate">Gerar exemplos</button>
+      </div>
+    </section>
+  </section>
+
+  <aside id="m-side">
+    <section class="panel">
+      <h2>Pesos carregados</h2>
+      <div class="collect-state" id="m-badge">
+        <span class="dot"></span>
+        <strong id="m-badge-text">—</strong>
+      </div>
+      <dl class="kv" id="m-model"></dl>
+      <div class="btn-row">
+        <button id="btn-reload">Recarregar pesos</button>
+      </div>
+    </section>
+
+    <section class="panel" id="m-training-panel" hidden>
+      <h2>Treino</h2>
+      <dl class="kv" id="m-training"></dl>
+    </section>
+
+    <section class="panel" id="m-dataset-panel" hidden>
+      <h2>Dataset de origem</h2>
+      <dl class="kv" id="m-dataset"></dl>
+      <div class="warning compact" id="m-split-warning" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Como treinar</h2>
+      <p class="hint">
+        Esta tela é somente leitura: as métricas são lidas de
+        <code>data/models/metrics.json</code>, produzido por
+        <code>train/train.py</code> — nada é calculado aqui.
+      </p>
+      <pre class="snippet">pip install -r train/requirements.txt
+python3 train/train.py \
+  --data datasets/v1/data.yaml \
+  --epochs 100</pre>
+      <p class="hint">
+        Ao terminar, o script copia <code>best.pt</code> para
+        <code>data/models/</code> e a aplicação detecta os pesos novos sozinha,
+        pelo mtime, sem reiniciar. O ciclo completo está em
+        <code>train/README.md</code>.
+      </p>
+    </section>
+  </aside>
+</main>
+
+<dialog id="lightbox">
+  <img id="lb-img" alt="">
+  <div class="lb-bar">
+    <code id="lb-name">—</code>
+    <button id="lb-close">Fechar</button>
+  </div>
+</dialog>
+
+<script src="/static/model.js"></script>
+</body>
+</html>

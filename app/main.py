@@ -2,8 +2,8 @@
 
 Estado do pipeline via SSE, start/stop com exibição do endereço RTMP, vídeo ao
 vivo em MJPEG com a inferência aplicada, coleta de quadros com split temporal ao
-salvar, tela de datasets com galeria e edição, e upload ao Roboflow preservando
-a partição. A tela de modelo e a pasta `train/` ficam para as fatias seguintes.
+salvar, tela de datasets com galeria e edição, upload ao Roboflow preservando a
+partição e tela de modelo com métricas e exemplos do conjunto de teste.
 """
 
 from __future__ import annotations
@@ -22,10 +22,12 @@ from starlette.concurrency import run_in_threadpool
 
 from . import collect as collect_mod
 from . import datasets as datasets_mod
+from . import metrics as metrics_mod
 from . import pipeline
 from . import roboflow_upload
 from .collect import collect
 from .roboflow_upload import uploader
+from .samples import samples
 from .inference import detector
 from .monitor import monitor
 from .video import BOUNDARY, video
@@ -114,6 +116,11 @@ async def dataset_page(request: Request, version: str):
     return templates.TemplateResponse(
         request, "dataset.html", {"current": "datasets", "version": version}
     )
+
+
+@app.get("/model", response_class=HTMLResponse)
+async def model_page(request: Request):
+    return templates.TemplateResponse(request, "model.html", {"current": "model"})
 
 
 @app.get("/events")
@@ -401,3 +408,42 @@ async def api_roboflow_cancel():
 @app.get("/api/roboflow/status")
 async def api_roboflow_status():
     return uploader.status()
+
+
+# --- tela de modelo ---------------------------------------------------------
+
+
+@app.get("/api/model/metrics")
+async def api_model_metrics():
+    """Lê `data/models/metrics.json`. **Nunca calcula métrica.**
+
+    Pode hashear o arquivo de pesos para conferir se o documento descreve o
+    `best.pt` carregado — vai para o threadpool por isso.
+    """
+    return await run_in_threadpool(metrics_mod.read)
+
+
+@app.get("/api/model/samples")
+async def api_model_samples():
+    """Estado do cache dos exemplos. Não gera nada, então nunca demora."""
+    return samples.status()
+
+
+@app.post("/api/model/samples/generate")
+async def api_model_samples_generate():
+    """Dispara a geração numa thread e responde na hora.
+
+    A primeira geração importa o torch e carrega os pesos, o que leva de 5 a
+    20 s; fazer isso dentro da requisição deixaria a tela pendurada.
+    """
+    return samples.generate()
+
+
+@app.get("/api/model/samples/image/{index}")
+async def api_model_sample_image(index: int):
+    try:
+        path = samples.image_path(index)
+    except datasets_mod.DatasetError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-cache"})

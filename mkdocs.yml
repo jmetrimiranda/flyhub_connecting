@@ -65,6 +65,7 @@ nav:
   - Plataforma:
       - Visão geral: plataforma/index.md
       - Como rodar: plataforma/rodar.md
+      - Rodar em máquina local: plataforma/maquina-local.md
       - Hospedar na internet: plataforma/hospedar.md
   - Painel de controle:
       - Visão geral: painel/index.md

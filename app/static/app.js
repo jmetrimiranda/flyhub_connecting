@@ -4,7 +4,11 @@ const $ = (id) => document.getElementById(id);
 
 const MARKS = { ok: "✓", error: "✕", running: "…", pending: "·", skipped: "·" };
 
+// "" = cinza (o padrão de .dot): túnel que ninguém pediu não é problema.
+const TUNNEL_DOT = { ok: "green", starting: "yellow", unused: "", down: "red" };
+
 let currentRtmp = null;
+let lastRtmpSource = undefined;  // undefined => ainda não renderizado
 let busy = false;
 let pending = false; // POST em voo — segura os botões até a resposta chegar
 
@@ -60,12 +64,14 @@ function render(state) {
       ? "No ar"
       : "Container no ar, API muda";
 
-  // Túnel
-  const tunUp = p.tunnel && p.tunnel.running;
-  setDot("dot-tunnel", tunUp ? (p.tunnel.address ? "green" : "yellow") : "red");
-  $("tunnel-label").textContent = !tunUp
-    ? "Parado"
-    : p.tunnel.address || "Subindo…";
+  // Túnel — informativo. Cinza quando não é usado; vermelho só quando era
+  // esperado e não subiu. Ver `_tunnel_state` no pipeline.py.
+  const tun = p.tunnel || {};
+  setDot("dot-tunnel", TUNNEL_DOT[tun.status] ?? "red");
+  $("tunnel-label").textContent = tun.label || "—";
+  $("card-tunnel").title = tun.status === "unused"
+    ? "PUBLIC_HOST está definida: o drone publica direto no IP da máquina."
+    : "";
 
   // Stream + semáforo de disponibilidade
   setDot("dot-availability", s.level || "red");
@@ -86,8 +92,13 @@ function render(state) {
   errBox.hidden = !errText;
   errBox.textContent = errText;
 
+  // aviso: falha em etapa opcional. Amarelo, não vermelho — o pipeline serve.
+  const warnBox = $("pipeline-warning");
+  warnBox.hidden = !p.warning;
+  warnBox.textContent = p.warning || "";
+
   // endereço RTMP
-  updateRtmp(p.rtmp_url || null);
+  updateRtmp(p.rtmp_url || null, p.rtmp_source || null);
 
   $("stream-path").textContent = p.stream_path || "—";
   if (p.path_detected) $("stream-path").title = "detectado no MediaMTX (configurado: " + p.configured_path + ")";
@@ -251,7 +262,8 @@ function renderModel(m) {
     ". A aplicação roda em passthrough: o vídeo passa intacto e nada é detectado.";
 }
 
-function updateRtmp(url) {
+function updateRtmp(url, source) {
+  renderRtmpReminder(source);
   if (url === currentRtmp) return;
   currentRtmp = url;
 
@@ -263,6 +275,26 @@ function updateRtmp(url) {
   copy.disabled = !url;
   copy.classList.remove("copied");
   copy.textContent = "Copiar";
+}
+
+/* Só o endereço do túnel muda a cada reinício; o do IP público é fixo, e
+   mandar reeditar o canal à toa treina a pessoa a ignorar o aviso. */
+function renderRtmpReminder(source) {
+  if (source === lastRtmpSource) return;
+  lastRtmpSource = source;
+
+  const box = $("rtmp-reminder");
+  if (source === "public_host") {
+    box.innerHTML =
+      "Endereço fixo, montado com <strong>PUBLIC_HOST</strong> — não muda entre " +
+      "reinícios. Confira que a porta 1935/tcp está liberada no firewall da máquina.";
+  } else {
+    box.innerHTML =
+      "O endereço muda a cada reinício. Depois de colar no FlightHub: " +
+      "<strong>reedite o canal de encaminhamento</strong> e " +
+      "<strong>desligue e religue o toggle</strong> — sem isso o drone continua " +
+      "publicando no endereço antigo.";
+  }
 }
 
 /* ---------- ações ---------- */
@@ -353,7 +385,11 @@ const COLLECT_DOT = {
 
    Existe para o modal de erro abrir na hora, sem ida ao servidor, e para o
    botão nunca disparar um start que vai falhar. O servidor revalida no
-   /api/collect/start: este payload pode ter dois segundos de idade. */
+   /api/collect/start: este payload pode ter dois segundos de idade.
+
+   Espelha `collect.preflight` item a item — e, como lá, o túnel não entra:
+   gravar depende do quadro chegar ao leitor RTSP local, não do caminho que o
+   drone usou para publicar. */
 function localChecks(state) {
   const p = state.pipeline || {};
   const s = state.stream || {};
@@ -362,8 +398,6 @@ function localChecks(state) {
   const paths = (s.paths || []).filter((x) => x.ready);
   const mtxUp = !!(p.mediamtx && p.mediamtx.running);
   const apiOk = !!s.api_ok;
-  const tun = p.tunnel || {};
-  const tunOk = !!(tun.running && tun.address);
   const diskOk = disk.ok !== false && !disk.over_limit;
 
   return [
@@ -380,12 +414,6 @@ function localChecks(state) {
       ok: mtxUp && apiOk, level: mtxUp && apiOk ? "green" : mtxUp ? "yellow" : "red",
       detail: mtxUp && apiOk ? "no ar, API respondendo" : mtxUp ? "container no ar, API muda" : "parado",
       fix: "Clique em Iniciar pipeline.",
-    },
-    {
-      key: "tunnel", label: "Túnel",
-      ok: tunOk, level: tunOk ? "green" : tun.running ? "yellow" : "red",
-      detail: tun.address || (tun.running ? "subindo…" : "parado"),
-      fix: "Clique em Iniciar pipeline para reabrir o túnel.",
     },
     {
       key: "stream", label: "Stream",

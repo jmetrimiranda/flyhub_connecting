@@ -99,6 +99,12 @@ def preflight(pipeline_snapshot: dict | None = None) -> dict:
     Chamada pelo botão antes de abrir o modal e de novo dentro do `start` — a
     interface pode estar olhando um estado de dois segundos atrás, e o disco
     pode ter enchido nesse intervalo.
+
+    O túnel **não** entra aqui. Gravar depende de o quadro chegar ao leitor
+    RTSP local; por onde o drone alcançou o MediaMTX — túnel, IP público, rede
+    local — não muda nada depois que o stream está de pé. Exigi-lo bloqueava a
+    coleta numa máquina com IP público, onde o túnel nem é usado. O estado dele
+    continua visível no cartão do cabeçalho.
     """
     snap = pipeline_snapshot if pipeline_snapshot is not None else pipeline.snapshot()
     stream = monitor.snapshot()
@@ -106,7 +112,6 @@ def preflight(pipeline_snapshot: dict | None = None) -> dict:
 
     mtx_up = bool((snap.get("mediamtx") or {}).get("running"))
     api_ok = bool(stream.get("api_ok"))
-    tunnel = snap.get("tunnel") or {}
     paths = [p for p in (stream.get("paths") or []) if p.get("ready")]
     level = stream.get("level")
 
@@ -132,16 +137,6 @@ def preflight(pipeline_snapshot: dict | None = None) -> dict:
             "detail": "no ar, API respondendo" if (mtx_up and api_ok)
                       else ("container no ar, API muda" if mtx_up else "parado"),
             "fix": None if (mtx_up and api_ok) else "Clique em Iniciar pipeline.",
-        },
-        {
-            "key": "tunnel",
-            "label": "Túnel",
-            "ok": bool(tunnel.get("running") and tunnel.get("address")),
-            "level": "green" if (tunnel.get("running") and tunnel.get("address"))
-                     else ("yellow" if tunnel.get("running") else "red"),
-            "detail": tunnel.get("address") or ("subindo…" if tunnel.get("running") else "parado"),
-            "fix": None if (tunnel.get("running") and tunnel.get("address"))
-                   else "Clique em Iniciar pipeline para reabrir o túnel.",
         },
         {
             "key": "stream",

@@ -480,6 +480,9 @@ code {
 
 #r-warnings .warning.compact { border-left: 3px solid var(--yellow); }
 
+/* Vem depois da lista de passos, não antes de um bloco. */
+#pipeline-warning { margin: 10px 0 0; }
+
 .split-table {
   width: 100%;
   border-collapse: collapse;

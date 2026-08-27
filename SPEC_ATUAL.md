@@ -22,12 +22,17 @@ Escopo entregue:
 A especificação está implementada por inteiro. As três telas existem e a
 navegação do topo não tem mais nenhuma entrada desabilitada.
 
+**O túnel deixou de ser pré-condição.** O servidor passou a rodar numa máquina
+com IP público, e o `bore.pub` está fora do ar (`Connection refused` na 7835).
+A aplicação assumia túnel em três lugares — a guarda da coleta, o cartão de
+estado e o `start.sh` — e os três foram corrigidos. Ver §17.
+
 Arquivos:
 
 | Arquivo | Papel |
 |---|---|
 | `app/main.py` | rotas HTTP, SSE e MJPEG |
-| `app/pipeline.py` | controle do container MediaMTX e do túnel bore |
+| `app/pipeline.py` | controle do container MediaMTX e do túnel bore (opcional — ver §17) |
 | `app/monitor.py` | thread de polling da API do MediaMTX e semáforo |
 | `app/video.py` | leitura do RTSP, worker de inferência, contadores e MJPEG |
 | `app/inference.py` | `Detector` — inferência ou passthrough, sem quebrar |
@@ -114,6 +119,7 @@ um único renderizador. **Não** traz o campo `ok`.
   "pipeline": {
     "busy": false,
     "error": null,
+    "warning": null,
     "steps": [
       {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
       {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
@@ -124,7 +130,10 @@ um único renderizador. **Não** traz o campo `ok`.
     "configured_path": "live/m4td",
     "path_detected": false,
     "mediamtx": {"running": true, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:49934"},
+    "tunnel": {"running": true, "address": "bore.pub:49934",
+               "expected": true, "status": "ok", "label": "bore.pub:49934"},
+    "public_host": null,
+    "rtmp_source": "tunnel",
     "rtmp_url": "rtmp://bore.pub:49934/live/m4td",
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -147,6 +156,7 @@ Campos de `pipeline` (montados por `pipeline.snapshot()`):
 |---|---|---|
 | `busy` | bool | há um start/stop em execução neste instante |
 | `error` | string \| null | mensagem do último start/stop que falhou; zerada no início de cada start/stop |
+| `warning` | string \| null | falha em etapa **opcional** — hoje só o túnel. Zerada junto com `error` |
 | `steps` | lista | relatório do último start/stop (ver §13). `[]` antes do primeiro |
 | `stream_path` | string | path **efetivo**: o nome real do path ativo no MediaMTX quando houver um; senão o configurado |
 | `configured_path` | string | o que `STREAM_PATH` ou o último start definiu |
@@ -155,12 +165,22 @@ Campos de `pipeline` (montados por `pipeline.snapshot()`):
 | `mediamtx.container` | string | sempre `"mtx"` (constante `CONTAINER`) |
 | `tunnel.running` | bool | há processo `bore local` vivo |
 | `tunnel.address` | string \| null | `host:porta` do túnel; `null` se o túnel não estiver vivo |
-| `rtmp_url` | string \| null | `rtmp://{address}/{stream_path}`; `null` sem endereço |
+| `tunnel.expected` | bool | `false` quando `PUBLIC_HOST` está definida — ninguém pediu túnel |
+| `tunnel.status` | string | `ok` \| `starting` \| `unused` \| `down` — a cor do cartão sai daqui |
+| `tunnel.label` | string | texto pronto do cartão (endereço, `subindo…`, `não usado (IP direto)`, `parado`) |
+| `public_host` | string \| null | `PUBLIC_HOST` normalizada para `host:porta`; `null` se não definida |
+| `rtmp_source` | string \| null | de onde veio o `rtmp_url`: `public_host`, `tunnel` ou `null` |
+| `rtmp_url` | string \| null | `rtmp://{host}/{stream_path}`; `null` sem host |
 | `rtsp_url` | string | sempre montado, mesmo com pipeline parado |
 | `hls_url` | string | idem |
 
 `rtsp_url` e `hls_url` são strings construídas a partir de `stream_path`, não
 verificações — continuam preenchidas com tudo parado.
+
+**`PUBLIC_HOST` ganha do túnel.** Se ela está definida é porque a máquina já é
+alcançável de fora; um `bore` que tenha sobrado de outra execução não deve mudar
+o endereço que o painel publica. Por isso `rtmp_host()` consulta `PUBLIC_HOST`
+primeiro e só cai no túnel quando ela está vazia.
 
 Os três URLs usam o path **efetivo**, não o configurado: com um path publicando
 sob outro nome, é o nome real que aparece. O sufixo do path é a única credencial
@@ -182,35 +202,107 @@ Corpo opcional. O modelo é `StartRequest` com um único campo:
   {"detail":[{"type":"string_type","loc":["body","stream_path"],"msg":"Input should be a valid string","input":123}]}
   ```
 
-Resposta real de um start bem-sucedido com `{"stream_path":"/live/m4td-a1b2c3"}`:
+#### O túnel é a última etapa e a única dispensável
+
+A lista de passos **não é fixa**. `PUBLIC_HOST` definida remove `Túnel` e
+`Endereço` da lista: o bore nem é executado, porque a máquina já é alcançável.
+Sem `PUBLIC_HOST` os dois passos entram, mas falhar neles não derruba o start —
+o resultado é `ok: true` com `warning` preenchido. Quem decide se dá para gravar
+é o MediaMTX de pé recebendo stream, não o bore.
+
+Os três casos abaixo foram capturados em execução real, contra o container
+`mtx` de verdade — inclusive o terceiro, com o `bore.pub` genuinamente fora do
+ar (`Connection refused` na 7835, confirmado na hora da captura).
+
+**Caso 1 — `PUBLIC_HOST=203.0.113.10`.** Sem etapa de túnel:
 
 ```json
 {
   "ok": true,
-  "pipeline": {
-    "busy": false,
-    "error": null,
-    "steps": [
-      {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
-      {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
-      {"name": "Túnel", "status": "ok", "detail": "bore local 1935 --to bore.pub"},
-      {"name": "Endereço", "status": "ok", "detail": "bore.pub:57671"}
-    ],
-    "stream_path": "live/m4td-a1b2c3",
-    "mediamtx": {"running": true, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:57671"},
-    "rtmp_url": "rtmp://bore.pub:57671/live/m4td-a1b2c3",
-    "rtsp_url": "rtsp://localhost:8554/live/m4td-a1b2c3",
-    "hls_url": "http://localhost:8888/live/m4td-a1b2c3"
-  },
-  "stream": {
-    "api_ok": true, "error": null, "paths": [],
-    "level": "red", "label": "Sem stream"
-  }
+  "busy": false,
+  "error": null,
+  "warning": null,
+  "steps": [
+    {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
+    {"name": "API", "status": "ok", "detail": "respondendo em :9997"}
+  ],
+  "stream_path": "live/m4td",
+  "mediamtx": {"running": true, "container": "mtx"},
+  "tunnel": {"running": false, "address": null, "expected": false,
+             "status": "unused", "label": "não usado (IP direto)"},
+  "public_host": "203.0.113.10:1935",
+  "rtmp_source": "public_host",
+  "rtmp_url": "rtmp://203.0.113.10:1935/live/m4td",
+  "rtsp_url": "rtsp://localhost:8554/live/m4td",
+  "hls_url": "http://localhost:8888/live/m4td"
 }
 ```
 
-Resposta real de um start que falhou (config inexistente):
+**Caso 2 — sem `PUBLIC_HOST`, túnel de pé.** Os quatro passos, como sempre foi
+(captura feita contra um `bore server` local, já que o `bore.pub` está fora do
+ar; o `BORE_TO` é a única diferença para o caso de produção):
+
+```json
+{
+  "ok": true,
+  "busy": false,
+  "error": null,
+  "warning": null,
+  "steps": [
+    {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
+    {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
+    {"name": "Túnel", "status": "ok", "detail": "bore local 1935 --to localhost"},
+    {"name": "Endereço", "status": "ok", "detail": "localhost:23644"}
+  ],
+  "stream_path": "live/m4td",
+  "mediamtx": {"running": true, "container": "mtx"},
+  "tunnel": {"running": true, "address": "localhost:23644", "expected": true,
+             "status": "ok", "label": "localhost:23644"},
+  "public_host": null,
+  "rtmp_source": "tunnel",
+  "rtmp_url": "rtmp://localhost:23644/live/m4td",
+  "rtsp_url": "rtsp://localhost:8554/live/m4td",
+  "hls_url": "http://localhost:8888/live/m4td"
+}
+```
+
+**Caso 3 — sem `PUBLIC_HOST` e `bore.pub` fora do ar.** `ok: true`, `error`
+vazio, `warning` preenchido; o passo `Endereço` fica vermelho e o cartão do
+túnel vai para `down`:
+
+```json
+{
+  "ok": true,
+  "busy": false,
+  "error": null,
+  "warning": "túnel indisponível (opcional): túnel não subiu. Error: could not connect to bore.pub:7835 | Caused by: | Connection refused (os error 111) — o MediaMTX está no ar. Publique no IP da máquina ou defina PUBLIC_HOST para montar o endereço RTMP sem túnel.",
+  "steps": [
+    {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
+    {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
+    {"name": "Túnel", "status": "ok", "detail": "bore local 1935 --to bore.pub"},
+    {"name": "Endereço", "status": "error",
+     "detail": "túnel não subiu. Error: could not connect to bore.pub:7835 | Caused by: | Connection refused (os error 111)"}
+  ],
+  "stream_path": "live/m4td",
+  "mediamtx": {"running": true, "container": "mtx"},
+  "tunnel": {"running": false, "address": null, "expected": true,
+             "status": "down", "label": "parado"},
+  "public_host": null,
+  "rtmp_source": null,
+  "rtmp_url": null,
+  "rtsp_url": "rtsp://localhost:8554/live/m4td",
+  "hls_url": "http://localhost:8888/live/m4td"
+}
+```
+
+O passo `Túnel` fica `ok` e o `Endereço` fica `error` porque o processo chegou a
+ser lançado: quem falhou foi a conexão com o servidor remoto, e `_wait_address`
+percebe isso pelo processo ter morrido sem anunciar endereço. O `detail`
+carrega as três últimas linhas **não vazias** do `/tmp/bore.log` — o descarte
+das linhas em branco é o que preserva a primeira, que é justamente a que nomeia
+o host e a porta.
+
+Resposta real de um start que falhou de verdade (config inexistente):
 
 ```json
 {
@@ -218,6 +310,7 @@ Resposta real de um start que falhou (config inexistente):
   "pipeline": {
     "busy": false,
     "error": "config não encontrado: /nao/existe.yml",
+    "warning": null,
     "steps": [
       {"name": "MediaMTX", "status": "error", "detail": "config não encontrado: /nao/existe.yml"},
       {"name": "API", "status": "skipped", "detail": ""},
@@ -226,7 +319,10 @@ Resposta real de um start que falhou (config inexistente):
     ],
     "stream_path": "live/m4td",
     "mediamtx": {"running": true, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:49934"},
+    "tunnel": {"running": true, "address": "bore.pub:49934", "expected": true,
+               "status": "ok", "label": "bore.pub:49934"},
+    "public_host": null,
+    "rtmp_source": "tunnel",
     "rtmp_url": "rtmp://bore.pub:49934/live/m4td",
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -238,6 +334,9 @@ Resposta real de um start que falhou (config inexistente):
 Falha **não** devolve status HTTP de erro: é sempre `200`, com `ok: false`.
 A verificação do arquivo de config acontece antes do `docker rm -f`, então esse
 erro específico não derruba um container que já estava rodando.
+
+`ok: false` fica reservado para falha em etapa **essencial** — MediaMTX ou API.
+Túnel que não sobe devolve `ok: true` com `warning`, como no caso 3 acima.
 
 Duração medida de um start completo bem-sucedido: **1,6 s** (`docker run` com a
 imagem já em cache local).
@@ -252,13 +351,17 @@ Sem campos. Resposta real:
   "pipeline": {
     "busy": false,
     "error": null,
+    "warning": null,
     "steps": [
       {"name": "Túnel", "status": "ok", "detail": "encerrado"},
       {"name": "MediaMTX", "status": "ok", "detail": "encerrado"}
     ],
     "stream_path": "live/m4td",
     "mediamtx": {"running": false, "container": "mtx"},
-    "tunnel": {"running": false, "address": null},
+    "tunnel": {"running": false, "address": null, "expected": true,
+               "status": "down", "label": "parado"},
+    "public_host": null,
+    "rtmp_source": null,
     "rtmp_url": null,
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -275,7 +378,10 @@ Sem campos. Resposta real:
 
 O `detail` de cada passo do stop é `"encerrado"` quando o comando devolveu
 código 0, e `"já estava parado"` quando não havia o que matar — parar duas vezes
-é seguro e continua devolvendo `ok: true`.
+é seguro e continua devolvendo `ok: true`. Com `PUBLIC_HOST` definida esse
+segundo caso vira `"não usado (IP direto)"`. O `pkill` roda de qualquer jeito:
+pode haver um `bore` de uma execução anterior, e parar o pipeline tem que parar
+tudo que ele subiu.
 
 Ambos os POST rodam em threadpool (`run_in_threadpool`), porque `pipeline.start`
 e `pipeline.stop` são bloqueantes e chamam `subprocess`.
@@ -341,6 +447,7 @@ decodificou. Quando divergem, a interface mostra os dois separados por `→`.
   "pipeline": {
     "busy": false,
     "error": null,
+    "warning": null,
     "steps": [
       {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
       {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
@@ -349,7 +456,10 @@ decodificou. Quando divergem, a interface mostra os dois separados por `→`.
     ],
     "stream_path": "live/m4td",
     "mediamtx": {"running": true, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:25069"},
+    "tunnel": {"running": true, "address": "bore.pub:25069", "expected": true,
+               "status": "ok", "label": "bore.pub:25069"},
+    "public_host": null,
+    "rtmp_source": "tunnel",
     "rtmp_url": "rtmp://bore.pub:25069/live/m4td",
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -371,6 +481,7 @@ decodificou. Quando divergem, a interface mostra os dois separados por `→`.
   "pipeline": {
     "busy": false,
     "error": null,
+    "warning": null,
     "steps": [
       {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
       {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
@@ -379,7 +490,10 @@ decodificou. Quando divergem, a interface mostra os dois separados por `→`.
     ],
     "stream_path": "live/m4td",
     "mediamtx": {"running": true, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:25069"},
+    "tunnel": {"running": true, "address": "bore.pub:25069", "expected": true,
+               "status": "ok", "label": "bore.pub:25069"},
+    "public_host": null,
+    "rtmp_source": "tunnel",
     "rtmp_url": "rtmp://bore.pub:25069/live/m4td",
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -429,6 +543,7 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
   "pipeline": {
     "busy": false,
     "error": null,
+    "warning": null,
     "steps": [
       {"name": "MediaMTX", "status": "ok", "detail": "container mtx no ar"},
       {"name": "API", "status": "ok", "detail": "respondendo em :9997"},
@@ -437,7 +552,10 @@ Origem de cada campo de `paths[]`, sobre o item de `/v3/paths/list`:
     ],
     "stream_path": "live/m4td",
     "mediamtx": {"running": false, "container": "mtx"},
-    "tunnel": {"running": true, "address": "bore.pub:25069"},
+    "tunnel": {"running": true, "address": "bore.pub:25069", "expected": true,
+               "status": "ok", "label": "bore.pub:25069"},
+    "public_host": null,
+    "rtmp_source": "tunnel",
     "rtmp_url": "rtmp://bore.pub:25069/live/m4td",
     "rtsp_url": "rtsp://localhost:8554/live/m4td",
     "hls_url": "http://localhost:8888/live/m4td"
@@ -503,11 +621,30 @@ clicável.** A cor nunca aparece sozinha — sempre acompanhada de texto.
 |---|---|---|---|
 | Disponibilidade | `Disponibilidade` | `stream.label` (ver §12). Antes do primeiro frame: `conectando…` | `stream.level` |
 | MediaMTX | `MediaMTX` | `Parado` / `No ar` / `Container no ar, API muda` | vermelho se container parado; verde se container no ar **e** `api_ok`; amarelo se container no ar e API não responde |
-| Túnel | `Túnel` | `Parado` / o endereço (`bore.pub:49934`) / `Subindo…` | vermelho se sem processo; verde se processo e endereço; amarelo se processo sem endereço ainda |
+| Túnel | `Túnel` | `tunnel.label`, montado no servidor (ver abaixo) | `tunnel.status`, traduzido pela tabela `TUNNEL_DOT` |
 | Stream | `Stream` | nomes dos paths separados por `, ` — ou `Nenhum path ativo` | igual a `stream.level` |
 
 No canto direito, fora dos cartões: `SSE: conectando` (estado inicial no HTML),
 `SSE: conectado`, `SSE: reconectando…`.
+
+**O cartão do túnel é informativo, não um alarme.** Ele deixou de ser uma
+pré-condição da coleta (§6) e passou a só relatar. Os quatro estados:
+
+| `tunnel.status` | Texto | Bolinha | Quando |
+|---|---|---|---|
+| `ok` | o endereço (`bore.pub:49934`) | verde | túnel esperado, processo vivo e endereço lido |
+| `starting` | `subindo…` | amarelo | túnel esperado, processo vivo, ainda sem endereço |
+| `unused` | `não usado (IP direto)` | cinza | `PUBLIC_HOST` definida — ninguém pediu túnel |
+| `down` | `parado` | vermelho | túnel esperado e não está de pé |
+
+Vermelho só no último caso: um túnel que não subiu porque ninguém pediu não é
+problema, e pintá-lo de vermelho treinaria a pessoa a ignorar o cartão. No
+estado `unused` o cartão ganha um `title` explicando que o drone publica direto
+no IP da máquina.
+
+A tradução de `status` para cor mora numa só tabela no JS
+(`TUNNEL_DOT = {ok: "green", starting: "yellow", unused: "", down: "red"}`); a
+string vazia é o cinza padrão de `.dot`, que não tem classe de cor.
 
 Antes do primeiro frame do SSE, as bolinhas ficam cinza (sem classe de cor) e os
 valores em `—`.
@@ -661,9 +798,20 @@ os três valores.
 - Sem endereço: texto `pipeline parado`, em cinza.
 - Com endereço: o URL completo, em verde, com borda esverdeada (classe `live`).
 
-Abaixo dele, aviso permanente em amarelo, sempre visível: o endereço muda a cada
-reinício, é preciso **reeditar o canal de encaminhamento** e **desligar e religar
-o toggle** no FlightHub.
+Com `PUBLIC_HOST` definida o campo já vem preenchido **antes do primeiro start**:
+o endereço não depende de nada ter subido, é a máquina mais a porta.
+
+Abaixo dele, aviso permanente em amarelo, com dois textos conforme
+`pipeline.rtmp_source`:
+
+| `rtmp_source` | Aviso |
+|---|---|
+| `tunnel` ou `null` | o endereço muda a cada reinício; é preciso **reeditar o canal de encaminhamento** e **desligar e religar o toggle** no FlightHub |
+| `public_host` | endereço fixo, montado com **`PUBLIC_HOST`**, não muda entre reinícios; conferir a porta 1935/tcp no firewall |
+
+Só o endereço do túnel muda a cada reinício. Mandar reeditar o canal quando o
+endereço é fixo treina a pessoa a ignorar o aviso justamente no caso em que ele
+importa.
 
 ### Relatório de passos
 
@@ -679,9 +827,16 @@ monoespaçada. Marcadores e aparência:
 | `pending` | `·` | linha inteira a 45% de opacidade |
 | `skipped` | `·` | linha inteira a 45% de opacidade |
 
-Abaixo da lista, uma caixa de erro vermelha aparece quando `pipeline.error` ou
-`stream.error` estiver preenchido (o do pipeline tem precedência); fica oculta
-quando ambos são nulos.
+A lista tem quatro linhas no start comum e **duas** quando `PUBLIC_HOST` está
+definida — `Túnel` e `Endereço` nem entram, porque não há o que relatar.
+
+Abaixo da lista, duas caixas, ambas ocultas quando vazias:
+
+- **aviso**, amarela (`#pipeline-warning`), alimentada por `pipeline.warning`:
+  hoje só o túnel que não subiu sem `PUBLIC_HOST`. Amarelo e não vermelho porque
+  o pipeline serve — o MediaMTX está no ar e a coleta funciona;
+- **erro**, vermelha (`#pipeline-error`), alimentada por `pipeline.error` ou
+  `stream.error` (o do pipeline tem precedência).
 
 ### Área da esquerda
 
@@ -1185,8 +1340,8 @@ do próprio status apagaria a mensagem da recusa. É o mesmo cuidado do
 
 ### Guarda de pré-condição
 
-`GET /api/collect/preflight` avalia cinco checagens. As quatro primeiras são os
-indicadores que já existiam na barra de estado; a quinta é o disco, incluída
+`GET /api/collect/preflight` avalia **quatro** checagens. As três primeiras são
+indicadores que já existiam na barra de estado; a quarta é o disco, incluída
 porque a especificação já exige parar a coleta acima de 90% e começar uma
 gravação que vai morrer em seguida não ajuda ninguém.
 
@@ -1194,31 +1349,37 @@ gravação que vai morrer em seguida não ajuda ninguém.
 |---|---|
 | `availability` | `stream.level == "green"` |
 | `mediamtx` | container no ar **e** API respondendo |
-| `tunnel` | processo `bore` vivo **e** endereço lido do log |
 | `stream` | há ao menos um path com `ready: true` |
 | `disk` | uso abaixo de `DISK_LIMIT_PCT` (90%) |
 
-Resposta real com tudo verde (recortada):
+**O túnel não é pré-condição.** Havia uma quinta checagem, `tunnel`, exigindo
+processo `bore` vivo com endereço lido do log. Ela saiu: gravar depende de o
+quadro chegar ao leitor RTSP local, e por onde o drone alcançou o MediaMTX —
+túnel, IP público, rede local — não muda nada depois que o stream está de pé.
+Exigi-la bloqueava a coleta numa máquina com IP público, onde o túnel nem é
+usado, e também com o `bore.pub` fora do ar. O estado do túnel continua visível
+no cartão do cabeçalho, agora informativo (§3 e §13).
+
+Resposta real com tudo verde, capturada **sem nenhum túnel de pé** e sem
+`PUBLIC_HOST` — exatamente o caso que a guarda antiga recusava:
 
 ```json
 {
   "ok": true,
   "checks": [
     {"key": "availability", "label": "Disponibilidade", "ok": true, "level": "green",
-     "detail": "Recebendo — 960×720 · 0.38 Mbps", "fix": null},
+     "detail": "Recebendo — 960×720 · 0.37 Mbps", "fix": null},
     {"key": "mediamtx", "label": "MediaMTX", "ok": true, "level": "green",
      "detail": "no ar, API respondendo", "fix": null},
-    {"key": "tunnel", "label": "Túnel", "ok": true, "level": "green",
-     "detail": "bore.pub:18473", "fix": null},
     {"key": "stream", "label": "Stream", "ok": true, "level": "green",
      "detail": "live/m4td", "fix": null},
     {"key": "disk", "label": "Disco", "ok": true, "level": "green",
-     "detail": "41% usado · 16.8 GB livres", "fix": null}
+     "detail": "56% usado · 209.1 GB livres", "fix": null}
   ],
   "failed": [],
   "next_version": "v0.0",
-  "disk": {"ok": true, "percent": 41.2, "free_bytes": 18051837952, "free_human": "16.8 GB",
-           "total_bytes": 33636024320, "limit_pct": 90.0, "over_limit": false},
+  "disk": {"ok": true, "percent": 56.0, "free_human": "209.1 GB",
+           "limit_pct": 90.0, "over_limit": false},
   "defaults": {
     "interval": 2.0, "interval_options": [0.5, 1.0, 2.0, 5.0],
     "limit": 500, "dedup": true, "dedup_mad": 2.0,
@@ -1226,6 +1387,10 @@ Resposta real com tudo verde (recortada):
   }
 }
 ```
+
+A gravação que se segue a esse preflight foi medida ponta a ponta sem túnel:
+seis quadros a 0,5 s, `save`, split, `{"train": 6, "valid": 0, "test": 0}` e os
+arquivos em `data/datasets/v0.0/raw/` e `train/images/`.
 
 Com o publicador desligado (medido, 12 s depois do `kill`):
 
@@ -1236,15 +1401,14 @@ Com o publicador desligado (medido, 12 s depois do `kill`):
     {"key": "availability", "ok": false, "level": "red", "detail": "Sem stream",
      "fix": "Nenhum stream chegando. Suba o pipeline e publique o endereço RTMP no FlightHub."},
     {"key": "mediamtx", "ok": true,  "detail": "no ar, API respondendo"},
-    {"key": "tunnel",    "ok": true,  "detail": "bore.pub:18473"},
     {"key": "stream", "ok": false, "level": "red", "detail": "nenhum path ativo",
      "fix": "Confira o endereço no FlightHub e religue o toggle do canal."},
-    {"key": "disk", "ok": true, "detail": "41% usado · 16.8 GB livres"}
+    {"key": "disk", "ok": true, "detail": "56% usado · 209.1 GB livres"}
   ]
 }
 ```
 
-**Validação dupla.** O JS reimplementa as mesmas cinco checagens sobre o último
+**Validação dupla.** O JS reimplementa as mesmas quatro checagens sobre o último
 payload do SSE (`localChecks()`) e abre o modal de erro sem ir ao servidor — é o
 que garante que o botão nunca dispare um start que vai falhar. O servidor
 revalida dentro do `start`, porque o payload do cliente pode ter dois segundos
@@ -2587,7 +2751,9 @@ enquanto ainda chegam bytes.
 
 ## 13. Passos do start
 
-Quatro passos, nesta ordem, com estes nomes exatos no relatório:
+Dois ou quatro passos, conforme `PUBLIC_HOST`. Sem ela, os quatro abaixo. Com
+ela, apenas `MediaMTX` e `API` — os dois do túnel não entram na lista, porque a
+máquina já é alcançável e não há bore a subir.
 
 | # | Nome | O que faz | Timeout |
 |---|---|---|---|
@@ -2611,12 +2777,14 @@ Mensagens de falha:
 |---|---|
 | `MediaMTX` | `config não encontrado: <caminho>` ou o stderr do `docker run`, truncado em 400 caracteres |
 | `API` | `API não respondeu em 15s. Veja: docker logs mtx` |
-| `Endereço` | `túnel não subiu. <últimas 3 linhas do /tmp/bore.log>`, truncado em 400 caracteres |
+| `Endereço` | `túnel não subiu. <últimas 3 linhas não vazias do /tmp/bore.log, unidas por " \| ">`, truncado em 400 caracteres. As linhas em branco são descartadas **antes** do corte: o erro do bore vem em bloco (`Error: …`, em branco, `Caused by:`, `    …`) e um corte cego nas três últimas linhas jogaria fora justamente a que nomeia o host e a porta |
 
 ### O que acontece quando um passo falha
 
-A sequência é interrompida na primeira exceção — não há retentativa nem passo
-opcional. Então:
+Não há retentativa, e a sequência é interrompida na primeira exceção. O que
+muda é a gravidade, e ela depende de o passo ser essencial ou não.
+
+**Passos 1 e 2 (essenciais).** Falha aqui derruba o start:
 
 1. O passo que estava em `running` vira **`error`** e recebe a mensagem no `detail`.
 2. Todos os passos ainda em `pending` viram **`skipped`**, com `detail` vazio.
@@ -2624,18 +2792,35 @@ opcional. Então:
 4. `busy` volta a `false` (o `finally` garante isso mesmo em falha).
 5. A resposta HTTP é `200` com `ok: false`.
 
-Nada é desfeito: se o passo 4 falhar, o container do passo 1 continua no ar e o
-processo `bore` do passo 3 continua vivo. Não há rollback.
+**Passos 3 e 4 (o túnel, opcional).** Os itens 1, 2 e 4 valem igual, mas a
+mensagem vai para **`pipeline.warning`**, não para `error`, e a resposta é
+`200` com **`ok: true`**. O MediaMTX ficou de pé: o pipeline serve para receber
+stream e gravar imagens, que é o que a coleta exige (§6). O que falta é só um
+endereço público para o drone publicar, e a mensagem diz isso, apontando as duas
+saídas — publicar no IP da máquina ou definir `PUBLIC_HOST`.
+
+Essa separação é o motivo de o túnel ter virado a última etapa e de os passos
+dele ficarem num bloco `try` próprio: uma falha ali não pode alcançar o
+`except` dos passos essenciais.
+
+Nada é desfeito em nenhum dos casos: se o passo 4 falhar, o container do passo 1
+continua no ar. Não há rollback.
 
 O passo 4 também aborta antes do timeout se descobrir que o processo `bore`
-morreu — nesse caso não espera os 20 s inteiros.
+morreu — nesse caso não espera os 20 s inteiros. Com o `bore.pub` fora do ar,
+medido: **1,2 s** do start inteiro até o `warning`.
 
 ### Passos do stop
 
 Dois passos, ordem inversa: `Túnel` (`pkill -f "bore local"`, 15 s) e depois
 `MediaMTX` (`docker rm -f mtx`, 60 s). `detail` é `encerrado` se o comando saiu
-com código 0, `já estava parado` caso contrário. O stop não é abortado por um
-passo que não encontrou nada para matar.
+com código 0; caso contrário `já estava parado`, ou `não usado (IP direto)`
+quando `PUBLIC_HOST` está definida. O stop não é abortado por um passo que não
+encontrou nada para matar.
+
+Ao contrário do start, o stop **não** pula o passo do túnel com `PUBLIC_HOST`
+definida: pode haver um `bore` de uma execução anterior, e parar o pipeline tem
+que parar tudo que ele subiu.
 
 ### Exclusão mútua
 
@@ -2661,6 +2846,8 @@ variáveis já lidas na importação.
 | `STREAM_PATH` | `live/m4td` | `app/pipeline.py` | Path usado no `rtmp_url`, `rtsp_url` e `hls_url` enquanto nenhum start passar `stream_path` explícito. É o mesmo nome de variável que o `start.sh` já usava. |
 | `MEDIAMTX_API` | `http://localhost:9997` | `app/pipeline.py` | Base da API do MediaMTX. `PATHS_LIST_URL` é essa base + `/v3/paths/list`, e vale tanto para o passo `API` do start quanto para o polling do monitor. Não muda a porta publicada pelo `docker run`, que é fixa. |
 | `BORE_TO` | `bore.pub` | `app/pipeline.py` | Destino do `bore local 1935 --to <BORE_TO>`. Permite apontar para um servidor bore próprio. |
+| `PUBLIC_HOST` | — (vazia) | `app/pipeline.py`, `start.sh` | Host público da máquina. Definida, o `rtmp_url` é montado com ela, o túnel **não** é iniciado e o cartão do túnel fica cinza. Aceita `ip`, `ip:porta`, `host` ou `rtmp://host`; sem porta, assume `RTMP_PORT`. Um `bore` que tenha sobrado de outra execução não muda o endereço publicado — `PUBLIC_HOST` ganha. |
+| `RTMP_PORT` | `1935` | `app/pipeline.py`, `start.sh` | Porta anexada ao `PUBLIC_HOST` quando ela vem sem porta. Não muda a porta publicada pelo `docker run`, que é fixa em 1935 — serve para o caso de haver um proxy ou um mapeamento externo diferente na frente. |
 | `PANEL_PORT` | `8080` | `run.sh` | Porta do uvicorn. O padrão é 8080 e não 8000 porque a 8000 costuma estar ocupada pelo `mkdocs serve` deste repositório. |
 | `MODEL_WEIGHTS` | `data/models/best.pt` (relativo à raiz) | `app/inference.py` | Arquivo de pesos. Não precisa existir: sem ele o detector fica em passthrough (§5). |
 | `MODEL_CONF` | `0.25` | `app/inference.py` | Limiar de confiança passado ao `predict` do Ultralytics. |
@@ -2755,12 +2942,28 @@ sistema, e não há de onde recuperá-la.
 
 ## 16. Limitações conhecidas
 
-**Endereço RTMP continua visível com o MediaMTX parado.** `rtmp_url` depende
-apenas do túnel: com `bore` vivo e container morto, o campo segue verde e o botão
-de copiar habilitado — está no estado C de §2. Não é imprecisão: o túnel de fato
+**Endereço RTMP continua visível com o MediaMTX parado.** `rtmp_url` não olha
+o container: com `bore` vivo e container morto, o campo segue verde e o botão de
+copiar habilitado — está no estado C de §2. Não é imprecisão: o túnel de fato
 escuta naquele endereço; o que falta é quem consuma do outro lado. O operador
 percebe pelo cartão MediaMTX em vermelho e pelo semáforo `MediaMTX não responde`,
 mas nada no próprio campo RTMP indica o problema.
+
+Com `PUBLIC_HOST` isso fica mais acentuado: o endereço aparece **antes do
+primeiro start**, porque é a máquina mais a porta e não depende de nada ter
+subido. Um endereço exibido não é promessa de que há alguém escutando — é o
+cartão MediaMTX que responde por isso.
+
+**`PUBLIC_HOST` não é verificada.** O valor é normalizado (`host:porta`) mas
+nunca resolvido nem testado: o painel não confere que o nome resolve, que o IP é
+mesmo o da máquina, nem que a 1935/tcp está aberta no firewall. Um valor errado
+produz um endereço de aparência perfeita que o drone não alcança, e o sintoma
+aparece só como "Sem stream" depois de configurar o FlightHub.
+
+**`PUBLIC_HOST` e `RTMP_PORT` são lidas na importação.** Como todas as outras
+(§14): trocar de máquina com IP público para máquina atrás de NAT, ou o
+contrário, exige reiniciar o painel. Não há como alternar entre túnel e IP
+direto pela interface.
 
 **Botão de copiar depende de contexto seguro.** O caminho normal é
 `navigator.clipboard.writeText`, usado só quando `window.isSecureContext` é
@@ -2789,14 +2992,18 @@ que alcance a porta pode iniciar ou parar o pipeline. Como o path do stream é a
 endereço completo de publicação.
 
 **Falha de start não faz rollback.** Um erro no passo 4 deixa o container do
-passo 1 no ar e o `bore` do passo 3 vivo. O caminho de recuperação é clicar em
-parar e iniciar de novo.
+passo 1 no ar. Hoje isso é justamente o comportamento desejado no caso do túnel
+(§13) — o pipeline serve sem ele —, mas continua sendo verdade que não há
+desfazimento para falhas em geral. O caminho de recuperação é clicar em parar e
+iniciar de novo.
 
 **O relatório de passos é histórico, não estado.** `steps` descreve o último
 start/stop e não é invalidado quando o container cai depois. Os quatro passos
-podem estar `ok` com o MediaMTX morto, como no estado C de §2.
+podem estar `ok` com o MediaMTX morto, como no estado C de §2. O mesmo vale para
+`warning`: um túnel que falhou no start e subiu depois por fora deixa o aviso na
+tela até o próximo start/stop, embora o cartão do túnel já mostre verde.
 
-**Sem persistência.** Reiniciar o painel zera `steps`, `error`, o path
+**Sem persistência.** Reiniciar o painel zera `steps`, `error`, `warning`, o path
 configurado e todos os contadores de vídeo (`dropped`, `reconnects`, o aviso de
 resolução). Não há banco: o SQLite entra com a coleta.
 
@@ -2977,3 +3184,87 @@ qualidade JPEG) e a geração dinâmica do `mediamtx.yml` — o arquivo
 `config/mediamtx.yml` é usado como está. As proporções do split continuam
 constantes em `app/split.py`: `POST /resplit` expõe `margin`, mas `ratios` só
 existe na assinatura de `split.run()`.
+
+---
+
+## 17. O túnel é opcional
+
+Contexto da mudança. O `bore.pub` está fora do ar — `Connection refused` na
+porta 7835, verificado no momento desta escrita — e o servidor passou a rodar
+numa máquina com IP público, onde o túnel nunca foi necessário. A aplicação
+assumia que sempre havia um, em três lugares: a guarda da coleta, o cartão de
+estado e o `start.sh`.
+
+### Por que o túnel existe
+
+Para dar um endereço alcançável a uma máquina sem IP público. É só isso. Ele
+está **na frente** do MediaMTX, não no meio do caminho do vídeo: depois que o
+drone publicou, o quadro chega ao painel por `rtsp://localhost:8554/...`, e por
+onde a conexão entrou não muda mais nada. Essa é a razão de fundo das três
+correções — o túnel é um detalhe de alcançabilidade da rede, não uma peça do
+pipeline de imagem.
+
+### As correções
+
+**1. A guarda da coleta não olha mais para o túnel.** `preflight()` avaliava
+cinco checagens e uma delas exigia `bore` vivo com endereço. Numa máquina com IP
+público, isso bloqueava a gravação por causa de um recurso que ninguém estava
+usando. Restaram quatro — disponibilidade, MediaMTX, stream e disco (§6). A
+guarda do cliente (`localChecks()` em `app/static/app.js`) espelha as mesmas
+quatro; as duas listas têm de ser mexidas juntas.
+
+**2. `PUBLIC_HOST`.** Definida, o painel monta o `rtmp_url` com ela
+(`rtmp://{PUBLIC_HOST}:{RTMP_PORT}/{path}`), não executa o bore e não lista os
+passos de túnel. Ela ganha de um `bore` que porventura esteja vivo: se está
+definida é porque a máquina é alcançável, e um túnel remanescente de outra
+execução não deve mudar o endereço publicado. Aceita `ip`, `ip:porta`, `host` e
+`rtmp://host`, porque o valor costuma ser colado do painel do provedor ou de um
+`curl ifconfig.me`. Ver §14.
+
+**3. O cartão do túnel virou informativo.** Quatro estados em `tunnel.status`,
+com o texto pronto vindo do servidor em `tunnel.label` (§3). Vermelho só em
+`down` — túnel esperado que não está de pé. `PUBLIC_HOST` definida dá cinza e
+`não usado (IP direto)`.
+
+**4. O `start.sh` acompanha.** Com `PUBLIC_HOST` ele imprime
+`==> Túnel: pulado`, monta o endereço e segue. Sem ela e com o bore falhando,
+imprime um **aviso** e sai com **código 0**, dizendo que o túnel é opcional e
+listando as três saídas: rodar com `PUBLIC_HOST`, usar o IP local (que ele
+resolve e imprime pronto, via `hostname -I`) ou conferir se o `bore.pub` voltou.
+Antes disso era `ERRO` e `exit 1`, o que fazia parecer que nada tinha subido —
+quando na verdade o MediaMTX estava no ar e a coleta funcionaria.
+
+O laço de espera também consulta `kill -0 $BORE_PID`: com o servidor remoto
+fora do ar o processo morre no primeiro segundo, e esperar os 20 s de timeout
+depois disso só atrasava o aviso. Medido: 20,1 s antes, 0,02 s depois.
+
+### Essencial vs. opcional
+
+A distinção nova é entre etapa essencial e etapa opcional, e ela aparece em três
+campos: `pipeline.error` (essencial falhou, `ok: false`), `pipeline.warning`
+(opcional falhou, `ok: true`) e `tunnel.expected` (se alguém pediu túnel). Hoje
+o túnel é a única etapa opcional; ela é a última da sequência e fica num bloco
+`try` próprio, para que sua falha não alcance o `except` das essenciais.
+
+### Os três casos, medidos
+
+Capturados em execução real contra o container `mtx`, com o `bore.pub`
+genuinamente fora do ar. Os payloads completos estão em §1.
+
+| Caso | Passos | `ok` | `warning` | Cartão do túnel | `rtmp_url` | Coleta |
+|---|---|---|---|---|---|---|
+| `PUBLIC_HOST=203.0.113.10` | 2 | `true` | `null` | cinza, `não usado (IP direto)` | `rtmp://203.0.113.10:1935/live/m4td` | liberada |
+| sem nada, túnel de pé | 4 | `true` | `null` | verde, o endereço | `rtmp://{addr}/live/m4td` | liberada |
+| sem nada, `bore.pub` fora do ar | 4 | `true` | preenchido | vermelho, `parado` | `null` | **liberada** |
+
+A última linha é a correção que importa: antes, essa combinação — a de hoje —
+recusava a gravação. Verificado ponta a ponta sem nenhum túnel de pé e sem
+`PUBLIC_HOST`: preflight `ok: true` nas quatro checagens, `POST
+/api/collect/start`, seis quadros a 0,5 s, `save`, split
+`{"train": 6, "valid": 0, "test": 0}` e os arquivos em disco.
+
+### O que continua bloqueando a coleta
+
+Sem stream não se grava, e isso não mudou. Com o MediaMTX parado e nada
+publicando, o preflight recusa com três falhas — `availability`, `mediamtx` e
+`stream` — e o `disk` verde. O túnel não aparece na lista em nenhum dos casos.

@@ -179,6 +179,7 @@
         Path do stream: <code id="stream-path">{{ stream_path }}</code>
       </div>
       <ol id="steps"></ol>
+      <div id="pipeline-warning" class="warning compact" hidden></div>
       <div id="pipeline-error" class="error" hidden></div>
     </section>
 
@@ -188,7 +189,7 @@
         <code id="rtmp-url">pipeline parado</code>
         <button id="btn-copy" disabled>Copiar</button>
       </div>
-      <div class="reminder">
+      <div class="reminder" id="rtmp-reminder">
         O endereço muda a cada reinício. Depois de colar no FlightHub:
         <strong>reedite o canal de encaminhamento</strong> e
         <strong>desligue e religue o toggle</strong> — sem isso o drone continua

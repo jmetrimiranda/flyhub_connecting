@@ -1,5 +1,5 @@
 opencv-python-headless==5.0.0.93
-numpy
+numpy<2.4
 av
 requests
 python-dotenv

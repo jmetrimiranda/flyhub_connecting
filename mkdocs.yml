@@ -1,6 +1,5 @@
-site_name: FlightHub 2 → OpenCV
-site_description: Pipeline de ingestão de vídeo ao vivo de drones DJI para visão computacional
-site_author: Samarco
+site_name: Drone Vision — M4TD
+site_description: Plataforma de inferência ao vivo e coleta de dataset a partir de drones DJI
 copyright: Uso interno
 
 theme:
@@ -25,8 +24,8 @@ theme:
     - navigation.sections
     - navigation.top
     - navigation.tracking
+    - navigation.indexes
     - content.code.copy
-    - content.code.annotate
     - search.highlight
     - toc.follow
 
@@ -52,31 +51,28 @@ markdown_extensions:
 
 nav:
   - Início: index.md
-  - Como funciona:
-      - Arquitetura: guia/arquitetura.md
-      - Por que precisa de túnel: guia/rede.md
-  - Passo a passo:
-      - Rodar do zero: guia/00-rodar-do-zero.md
-      - 1. Servidor de mídia: guia/01-mediamtx.md
-      - 2. Túnel público: guia/02-tunel.md
-      - 3. Canal no FlightHub: guia/03-flighthub.md
-      - 4. Captura no OpenCV: guia/04-captura.md
-      - 5. Visualização: guia/05-visualizacao.md
-  - Plataforma:
-      - Visão geral: plataforma/index.md
-      - Como rodar: plataforma/rodar.md
-      - Rodar em máquina local: plataforma/maquina-local.md
-      - Hospedar na internet: plataforma/hospedar.md
-  - Painel de controle:
-      - Visão geral: painel/index.md
-      - Referência dos controles: painel/controles.md
-      - API e armadilhas: painel/api.md
+  - Arquitetura:
+      - Visão geral: arquitetura/index.md
+      - Fluxo de informação: arquitetura/fluxo.md
+      - Tecnologias: arquitetura/tecnologias.md
+  - Rodar a aplicação:
+      - Instalação: rodar/index.md
+      - Modo teste: rodar/teste.md
+      - Modo voo: rodar/voo.md
+      - Serviço permanente: rodar/servico.md
+  - A plataforma:
+      - Tela Home: plataforma/home.md
+      - Tela Datasets: plataforma/datasets.md
+      - Tela Modelo: plataforma/modelo.md
+  - Treinar o modelo:
+      - Visão geral e Git Flow: treino/index.md
+      - 1. Dataset: treino/01-dataset.md
+      - 2. Rotulagem assistida: treino/02-rotulagem.md
+      - 3. Treino: treino/03-treino.md
+      - 4. Avaliação: treino/04-avaliacao.md
+      - 5. Threshold: treino/05-threshold.md
+      - 6. Publicar os pesos: treino/06-publicar.md
   - Operação:
-      - Testar sem drone: guia/testar-sem-drone.md
-      - Reiniciar o pipeline: guia/reiniciar.md
-      - Reduzir latência: guia/latencia.md
-      - Solução de problemas: guia/troubleshooting.md
-      - Ir para produção: guia/producao.md
-  - Referência:
-      - Arquivos de configuração: referencia/arquivos.md
-      - Comandos rápidos: referencia/comandos.md
+      - Rede e acesso remoto: operacao/rede.md
+      - Reduzir latência: operacao/latencia.md
+      - Solução de problemas: operacao/troubleshooting.md

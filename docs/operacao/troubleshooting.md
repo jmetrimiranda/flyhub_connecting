@@ -47,7 +47,7 @@ Dois publishers competindo. Nos logs do MediaMTX aparece `closing existing publi
 You must add a credit or debit card before you can use TCP endpoints
 ```
 
-Contas gratuitas do ngrok exigem cartão para endpoints TCP. Use [bore ou playit.gg](02-tunel.md).
+Contas gratuitas do ngrok exigem cartão para endpoints TCP. Use IP público com port forward — ver [rede](rede.md).
 
 ---
 
@@ -59,7 +59,7 @@ A API vem desabilitada por padrão. Adicione `api: yes` ou `-e MTX_API=yes`.
 
 ### `{"status":"error","error":"authentication error"}`
 
-Versões recentes exigem permissões explícitas. Use o bloco `authInternalUsers` da [etapa 1](01-mediamtx.md), incluindo `action: api`.
+Versões recentes exigem permissões explícitas. Use o bloco `authInternalUsers` da [instalação](../rodar/index.md), incluindo `action: api`.
 
 ### `part duration changed ... error in iOS clients`
 

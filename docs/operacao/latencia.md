@@ -9,7 +9,7 @@ A latência total é a soma de seis parcelas. Vale saber quais você controla.
 | Captura e encode na aeronave | 100–300 ms | Parcialmente (qualidade) |
 | Enlace de rádio / 4G até o dock | 200–800 ms | Não |
 | Processamento na nuvem DJI | 500–1500 ms | Não |
-| Relay do túnel | 100–600 ms | Sim (trocar por IP direto) |
+| Rede até sua casa | 20–80 ms | Já otimizado (IP direto) |
 | MediaMTX | 10–50 ms | Sim (configuração) |
 | Buffer do OpenCV | **0 a ∞** | **Sim — maior ganho** |
 
@@ -21,7 +21,7 @@ Este é o maior de todos e o mais ignorado.
 
 Se sua inferência é mais lenta que a taxa de quadros, `cap.read()` sequencial forma uma fila que **cresce sem limite**. Após um minuto de operação você pode estar analisando imagem de 30 segundos atrás — e o pior é que não parece um bug, porque o vídeo continua fluido.
 
-A correção é o leitor em thread da [etapa 4](04-captura.md): a thread lê no ritmo da rede e sobrescreve; o laço principal sempre pega o mais recente.
+A correção é o leitor em thread da a arquitetura de slot único: a thread lê no ritmo da rede e sobrescreve; o laço principal sempre pega o mais recente.
 
 ```python
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
@@ -67,11 +67,13 @@ Menor resolução reduz latência de encode, transmissão e decode ao mesmo temp
 !!! tip "Teste antes de decidir"
     Rode a rede neural nas duas qualidades e compare o recall em objetos pequenos. Se não houver diferença mensurável, fique na menor.
 
-## Ganho 4: eliminar o relay
+## Ganho 4: IP direto em vez de relay
 
-O `bore.pub` adiciona um salto pela internet, possivelmente em outro continente. Uma VM com IP público na mesma região da operação remove essa parcela.
+Já aplicado nesta arquitetura. Um túnel público adicionaria um salto pela internet, possivelmente em outro continente.
 
-**Impacto: 100–600 ms.**
+Com `PUBLIC_HOST` e port forward, a DJI conecta direto na sua máquina.
+
+**Economia: 100–600 ms.**
 
 ## Ganho 5: descartar o áudio
 
@@ -95,7 +97,7 @@ Aplique nesta ordem — a lista está em ordem decrescente de impacto por esfor�
 1. [x] Apagar canais duplicados
 2. [x] Usar o leitor em thread
 3. [x] Fixar a qualidade no FlightHub
-4. [ ] Trocar o relay por IP público
+4. [x] IP público direto (já feito)
 5. [ ] Ajustar `hlsPartDuration` se usar HLS
 
 Com 1 a 3 aplicados, espere latência estável de 3 a 5 segundos, dominada pela nuvem da DJI. Chegar abaixo disso exige On-Premises, onde o vídeo não sai da rede local.

@@ -1,71 +1,66 @@
-# Vídeo ao vivo do drone dentro do OpenCV
+# Drone Vision — M4TD
 
-Este guia documenta como capturar o vídeo de uma aeronave ou dock DJI gerenciado pelo **FlightHub 2** e entregá-lo a um script Python, quadro a quadro, para processamento por rede neural.
+Plataforma que traz o vídeo ao vivo de drones DJI para uma máquina local, roda inferência em tempo real e coleta imagens rotuláveis para retreinar o modelo.
 
-O resultado final é uma linha de código:
+Tudo roda numa máquina só. Sem nuvem, sem custo de GPU, sem túnel.
 
-```python
-cap = cv2.VideoCapture("rtsp://localhost:8554/live/m4td")
-```
-
-Tudo neste guia existe para tornar essa linha possível.
-
-## O que você vai montar
+## O ciclo
 
 ```
-Matrice 4TD  →  FlightHub 2  →  túnel  →  MediaMTX  →  OpenCV  →  rede neural
-   (campo)       (nuvem DJI)   (público)  (servidor)   (Python)
+    ┌──────────────────────────────────────────────────────┐
+    │                                                      │
+    ▼                                                      │
+  VOA ──► COLETA ──► SPLIT ──► ROBOFLOW ──► ANOTA ──► TREINA
+  drone     Home     temporal    Datasets    manual    train/
+                     automático                            │
+                                                           ▼
+                                                      best.pt
+                                                           │
+                                             ┌─────────────┘
+                                             ▼
+                                      INFERÊNCIA AO VIVO
+                                      Home + tela Modelo
 ```
 
-## Pré-requisitos
+Cada volta melhora o modelo. A plataforma cobre tudo menos a anotação, que é manual no Roboflow — e mesmo essa fica mais rápida a cada rodada, porque o modelo anterior pré-rotula.
 
-- Conta no FlightHub 2 com papel de **Administrador da organização**
-- Dispositivo (dock ou aeronave) vinculado e capaz de ficar online
-- Um ambiente Linux com Docker — GitHub Codespaces serve para desenvolvimento
-- Nenhum acesso administrativo à rede corporativa é necessário
-
-!!! warning "A restrição que define a arquitetura"
-    O FlightHub 2 **não tem API de pull de vídeo**. Todos os caminhos oficiais funcionam por *push*: a nuvem da DJI conecta no seu servidor. Isso significa que sempre haverá um endereço público alcançável no meio do caminho — não é limitação de ferramenta, é arquitetura.
-
-## Caminho rápido
-
-**[Rodar do zero](guia/00-rodar-do-zero.md)** — do ambiente vazio até ver quadros no Python, em 5 minutos. É a única página necessária para operar.
-
-As etapas individuais existem para quando algo der errado ou você quiser entender o porquê:
-
-1. [Subir o MediaMTX](guia/01-mediamtx.md)
-2. [Abrir o túnel](guia/02-tunel.md)
-3. [Configurar o canal no FlightHub](guia/03-flighthub.md)
-4. [Rodar a captura](guia/04-captura.md)
-
-Se algo não funcionar, [solução de problemas](guia/troubleshooting.md) cobre os erros que aparecem na prática.
-
-## Já configurou antes?
-
-Com os scripts do repositório, as etapas 1 e 2 viram um comando:
-
-```bash
-./stop.sh && ./start.sh
-```
-
-Ele imprime o endereço RTMP novo, que você cola no FlightHub ([etapa 3](guia/03-flighthub.md)) antes de religar o toggle do canal.
-
-Detalhes em [reiniciar o pipeline](guia/reiniciar.md) — inclui a tabela de qual comando usar para cada sintoma e onde retomar.
-
-Ou use o [painel de controle](painel/index.md), que faz o mesmo pela web e mostra em tempo real se há voo disponível:
-
-```bash
-./run.sh
-```
-
-## Estado atual validado
-
-Configuração testada e funcionando em 24/08/2026:
+## Máquina de referência
 
 | Item | Valor |
 |---|---|
-| Origem | Matrice 4TD, câmera Carga-zoom |
-| Codec | H.264, 960×720 |
-| Áudio | AAC 44.1 kHz estéreo (descartado pelo OpenCV) |
-| Transporte | RTMP para ingestão, RTSP para consumo |
-| Latência ponta a ponta | 3–6 s (ver [redução de latência](guia/latencia.md)) |
+| Máquina | Alienware 16 Area-51 |
+| GPU | RTX 5070 Laptop, 8 GB VRAM |
+| RAM | 64 GB |
+| Sistema | Ubuntu |
+| Python | 3.14 |
+| CUDA | 12.8 (torch 2.11) |
+
+Qualquer máquina Linux com GPU NVIDIA serve. Sem GPU também roda, mas a inferência cai para ~3 fps.
+
+## Por onde começar
+
+**Primeira vez** → [Instalação](rodar/index.md)
+
+**Já instalado, quer testar sem drone** → [Modo teste](rodar/teste.md)
+
+**Tem voo agendado** → [Modo voo](rodar/voo.md)
+
+**Quer entender como funciona** → [Arquitetura](arquitetura/index.md)
+
+**Vai treinar um modelo** → [Treinar o modelo](treino/index.md)
+
+## Estado atual
+
+| Componente | Situação |
+|---|---|
+| Ingestão de vídeo | Funcionando |
+| Inferência ao vivo | Funcionando (passthrough sem pesos) |
+| Coleta e split temporal | Funcionando |
+| Envio ao Roboflow | Funcionando |
+| Treino | Script pronto, sem modelo treinado ainda |
+| Autenticação | **Não implementada** |
+
+!!! danger "Sem autenticação"
+    A rota `/api/pipeline/status` devolve o endereço RTMP completo, e o path do stream é a única credencial do endpoint de publicação.
+
+    Em rede local, tudo bem. Não exponha a porta 8080 à internet sem colocar um proxy com autenticação na frente.

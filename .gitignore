@@ -6,3 +6,4 @@ site/
 *.jpg
 *.mp4
 data/
+*.pt
